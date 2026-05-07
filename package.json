@@ -5,7 +5,11 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "test": "node --test",
+    "test": "npm run test:js && npm run test:python",
+    "test:js": "node --test",
+    "test:python": "python3 -m unittest discover -s tests",
+    "train:ai": "python3 -m tetris_ai.train",
+    "eval:ai": "python3 -m tetris_ai.evaluate",
     "build": "vite build",
     "preview": "vite preview"
   },

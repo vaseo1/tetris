@@ -1,5 +1,10 @@
 import './style.css';
 import {
+  choosePlacement,
+  createReplayController,
+  loadModelFromUrl,
+} from './agent.js';
+import {
   ACTIONS,
   COLS,
   ROWS,
@@ -11,6 +16,8 @@ import {
 
 const CELL = 30;
 const GRAVITY_MS = 700;
+const DEFAULT_MODEL_URL = '/runs/tetris-agent/best-model.json';
+const DEFAULT_REPLAY_URL = '/runs/tetris-agent/best-replay.json';
 
 const COLORS = {
   empty: '#a7b9af',
@@ -25,12 +32,38 @@ const boardCanvas = document.querySelector('#board');
 const nextCanvas = document.querySelector('#next');
 const scoreNode = document.querySelector('#score');
 const statusNode = document.querySelector('#status');
+const aiButton = document.querySelector('#ai-button');
+const replayButton = document.querySelector('#replay-button');
+const agentTimeNode = document.querySelector('#agent-time');
+const agentStatusNode = document.querySelector('#agent-status');
 const ctx = boardCanvas.getContext('2d');
 const nextCtx = nextCanvas.getContext('2d');
 
 let game = createGame();
 let state = getGameState(game);
 let lastGravityAt = performance.now();
+let agentModel = null;
+let aiTimer = null;
+let replayController = null;
+let replayTimer = null;
+let agentElapsedMs = 0;
+let replayFrameMs = GRAVITY_MS;
+
+function formatElapsed(ms) {
+  const totalSeconds = Math.floor(ms / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+}
+
+function setAgentElapsed(ms) {
+  agentElapsedMs = Math.max(0, ms);
+  agentTimeNode.textContent = formatElapsed(agentElapsedMs);
+}
+
+function resetAgentElapsed() {
+  setAgentElapsed(0);
+}
 
 function resetGravityClock() {
   lastGravityAt = performance.now();
@@ -44,6 +77,9 @@ function renderCurrentState() {
 }
 
 function resetGame(options = {}) {
+  stopAi();
+  stopReplay();
+  resetAgentElapsed();
   game = createGame(options);
   resetGravityClock();
   renderCurrentState();
@@ -73,6 +109,10 @@ function applyAction(action) {
 
 function setStatus(text) {
   statusNode.textContent = text;
+}
+
+function setAgentStatus(text) {
+  agentStatusNode.textContent = text;
 }
 
 function updateScore() {
@@ -153,8 +193,123 @@ function render() {
   drawNext();
 }
 
+function stopAi() {
+  if (aiTimer) {
+    clearInterval(aiTimer);
+    aiTimer = null;
+  }
+  aiButton?.classList.remove('is-active');
+}
+
+function runAiStep() {
+  if (state.gameOver || state.paused) {
+    stopAi();
+    setAgentStatus(state.gameOver ? 'DONE' : 'PAUSED');
+    return;
+  }
+
+  const placement = choosePlacement(state, agentModel);
+  if (!placement) {
+    stopAi();
+    setAgentStatus('NO MOVE');
+    return;
+  }
+
+  state = window.tetrisAgent.stepMany(placement.actions);
+  setAgentElapsed(agentElapsedMs + GRAVITY_MS);
+  setAgentStatus(agentModel ? 'MODEL' : 'HEUR');
+}
+
+function startAi() {
+  aiButton.classList.add('is-active');
+  setAgentStatus(agentModel ? 'MODEL' : 'HEUR');
+  runAiStep();
+  aiTimer = setInterval(runAiStep, 120);
+}
+
+async function toggleAi() {
+  stopReplay();
+  resetGame({ seed: game.seed });
+  setAgentStatus('LOAD MODEL');
+
+  try {
+    agentModel = await loadModelFromUrl(DEFAULT_MODEL_URL);
+    startAi();
+  } catch (error) {
+    agentModel = null;
+    setAgentStatus('NO MODEL');
+    console.error(error);
+  }
+}
+
+function showReplayFrame(frame) {
+  if (!frame?.state) return;
+  state = frame.state;
+  updateScore();
+  setStatus(state.status);
+  render();
+}
+
+function stopReplay() {
+  if (replayTimer) {
+    clearInterval(replayTimer);
+    replayTimer = null;
+  }
+  replayButton?.classList.remove('is-active');
+}
+
+async function loadDefaultReplay() {
+  const response = await fetch(DEFAULT_REPLAY_URL, { cache: 'no-store' });
+  if (!response.ok) {
+    throw new Error(`Could not load replay from ${DEFAULT_REPLAY_URL}: ${response.status}`);
+  }
+  return response.json();
+}
+
+function startReplay() {
+  if (!replayController?.length) {
+    setAgentStatus('NO REPLAY');
+    return;
+  }
+
+  replayController.reset();
+  showReplayFrame(replayController.next());
+  setAgentElapsed(0);
+
+  replayButton.classList.add('is-active');
+  setAgentStatus('PLAYING');
+  replayTimer = setInterval(() => {
+    const before = replayController.index;
+    const frame = replayController.next();
+    showReplayFrame(frame);
+    setAgentElapsed(before * replayFrameMs);
+    if (replayController.index === before) {
+      stopReplay();
+      setAgentStatus('DONE');
+    }
+  }, 350);
+}
+
+async function playReplay() {
+  stopAi();
+  stopReplay();
+  resetGame({ seed: game.seed });
+  setAgentStatus('LOAD REPLAY');
+
+  try {
+    const replay = await loadDefaultReplay();
+    replayFrameMs = Math.max(1, Number(replay.gravitySeconds ?? GRAVITY_MS / 1000) * 1000);
+    replayController = createReplayController(replay);
+    startReplay();
+  } catch (error) {
+    replayController = null;
+    setAgentStatus('NO REPLAY');
+    console.error(error);
+  }
+}
+
 function tick(time) {
-  if (!state.gameOver && !state.paused && time - lastGravityAt >= GRAVITY_MS) {
+  if (!replayTimer && !state.gameOver && !state.paused && time - lastGravityAt >= GRAVITY_MS) {
     const ticks = Math.floor((time - lastGravityAt) / GRAVITY_MS);
     state = advanceGravity(game, ticks);
     lastGravityAt += ticks * GRAVITY_MS;
@@ -191,6 +346,9 @@ window.addEventListener('keydown', (event) => {
   }
 });
 
+aiButton.addEventListener('click', toggleAi);
+replayButton.addEventListener('click', playReplay);
+
 window.tetrisAgent = {
   actions: { ...ACTIONS },
   reset(options = {}) {
@@ -212,6 +370,9 @@ window.tetrisAgent = {
   getState() {
     state = getGameState(game);
     return state;
+  },
+  chooseAiPlacement() {
+    return choosePlacement(state, agentModel);
   },
 };
 
