@@ -7,6 +7,7 @@ import os
 import random
 import time
 from collections import deque
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from statistics import mean, median
@@ -19,6 +20,9 @@ from .model import best_device, make_value_net, require_torch
 
 GRAVITY_SECONDS = 0.7
 HELD_OUT_SEEDS = [f"heldout-{index}" for index in range(200)]
+_EVAL_MODEL = None
+_EVAL_TORCH = None
+_EVAL_DEVICE = "cpu"
 
 
 @dataclass
@@ -195,46 +199,102 @@ def load_checkpoint(torch, checkpoint_path: Path) -> dict[str, Any] | None:
     return torch.load(checkpoint_path, map_location="cpu", weights_only=False)
 
 
-def evaluate(model, torch, device, seeds: list[Any], max_seconds: float, capture_replay: bool = False):
-    episodes = []
-    best_replay = None
+def evaluate_seed(model, torch, device, seed: Any, max_seconds: float, capture_replay: bool = False):
     max_pieces = max(1, math.ceil(max_seconds / GRAVITY_SECONDS))
+    game = create_game(seed)
+    frames = []
+    pieces = 0
+    while not game.game_over and pieces < max_pieces:
+        placement = choose_placement(model, torch, device, game, epsilon=0.0)
+        if placement is None:
+            break
+        if capture_replay:
+            frames.append({"state": get_state(game), "actions": list(placement.actions)})
+        game = apply_actions(game, placement.actions)
+        pieces += 1
 
-    for seed in seeds:
-        game = create_game(seed)
-        frames = []
-        pieces = 0
-        while not game.game_over and pieces < max_pieces:
-            placement = choose_placement(model, torch, device, game, epsilon=0.0)
-            if placement is None:
-                break
-            if capture_replay:
-                frames.append({"state": get_state(game), "actions": list(placement.actions)})
-            game = apply_actions(game, placement.actions)
-            pieces += 1
-
-        metrics = board_metrics(game.board)
-        result = {
+    metrics = board_metrics(game.board)
+    result = {
+        "seed": str(seed),
+        "survivalSeconds": min(max_seconds, pieces * GRAVITY_SECONDS),
+        "pieces": pieces,
+        "linesCleared": game.lines_cleared,
+        "score": game.score,
+        "gameOver": game.game_over,
+        "maxHeight": metrics["maxHeight"],
+        "holes": metrics["holes"],
+        "bumpiness": metrics["bumpiness"],
+    }
+    replay = None
+    if capture_replay:
+        replay = {
             "seed": str(seed),
-            "survivalSeconds": min(max_seconds, pieces * GRAVITY_SECONDS),
-            "pieces": pieces,
-            "linesCleared": game.lines_cleared,
-            "score": game.score,
-            "gameOver": game.game_over,
-            "maxHeight": metrics["maxHeight"],
-            "holes": metrics["holes"],
-            "bumpiness": metrics["bumpiness"],
+            "gravitySeconds": GRAVITY_SECONDS,
+            "frames": frames,
+            "finalState": get_state(game),
+            "result": result,
         }
-        episodes.append(result)
-        if capture_replay and best_replay is None:
-            best_replay = {
-                "seed": str(seed),
-                "gravitySeconds": GRAVITY_SECONDS,
-                "frames": frames,
-                "finalState": get_state(game),
-                "result": result,
-            }
+    return result, replay
 
+
+def init_eval_worker(model_state: dict[str, Any]) -> None:
+    global _EVAL_DEVICE, _EVAL_MODEL, _EVAL_TORCH
+    _EVAL_TORCH, _ = require_torch()
+    _EVAL_TORCH.set_num_threads(1)
+    _EVAL_DEVICE = _EVAL_TORCH.device("cpu")
+    _EVAL_MODEL = make_value_net().to(_EVAL_DEVICE)
+    _EVAL_MODEL.load_state_dict(model_state)
+    _EVAL_MODEL.eval()
+
+
+def evaluate_seed_in_worker(task):
+    seed, max_seconds, capture_replay = task
+    return evaluate_seed(_EVAL_MODEL, _EVAL_TORCH, _EVAL_DEVICE, seed, max_seconds, capture_replay)
+
+
+def resolved_eval_workers(eval_workers: int, seed_count: int) -> int:
+    if seed_count <= 1:
+        return 1
+    if eval_workers > 0:
+        return max(1, min(eval_workers, seed_count))
+    return max(1, min(os.cpu_count() or 1, seed_count))
+
+
+def summarize_eval_results(results):
+    episodes = [result for result, _replay in results]
+    best_replay = next((replay for _result, replay in results if replay is not None), None)
+    return episodes, best_replay
+
+
+def evaluate(
+    model,
+    torch,
+    device,
+    seeds: list[Any],
+    max_seconds: float,
+    capture_replay: bool = False,
+    eval_workers: int = 1,
+):
+    workers = resolved_eval_workers(eval_workers, len(seeds))
+    if workers <= 1:
+        results = [
+            evaluate_seed(model, torch, device, seed, max_seconds, capture_replay and index == 0)
+            for index, seed in enumerate(seeds)
+        ]
+    else:
+        model_state = {key: value.detach().cpu() for key, value in model.state_dict().items()}
+        tasks = [
+            (seed, max_seconds, capture_replay and index == 0)
+            for index, seed in enumerate(seeds)
+        ]
+        with ProcessPoolExecutor(
+            max_workers=workers,
+            initializer=init_eval_worker,
+            initargs=(model_state,),
+        ) as executor:
+            results = list(executor.map(evaluate_seed_in_worker, tasks))
+
+    episodes, best_replay = summarize_eval_results(results)
     success_rate = mean(1.0 if episode["survivalSeconds"] >= max_seconds else 0.0 for episode in episodes)
     scores = [episode["score"] for episode in episodes]
     lines = [episode["linesCleared"] for episode in episodes]
@@ -254,10 +314,12 @@ def evaluate(model, torch, device, seeds: list[Any], max_seconds: float, capture
 
 
 def print_training_legend(args) -> None:
+    workers = "auto" if args.eval_workers == 0 else str(args.eval_workers)
     print("Training output guide:")
     print(f"  eval_success = fraction of held-out seeds that survive {args.milestone_seconds:.0f}s;")
     print("  median = median survival time;")
     print("  mean_score/median_score/max_score = held-out evaluation scores;")
+    print(f"  eval_workers = {workers} parallel worker process(es) for held-out evaluation;")
     print("Resume hint:")
     print(f"  uv run npm run train:ai -- --resume --episodes {args.episodes};")
     print("  uv run python -m tetris_ai.train --resume --episodes N;")
@@ -373,6 +435,7 @@ def run(args) -> None:
                 HELD_OUT_SEEDS[: args.eval_seeds],
                 args.milestone_seconds,
                 capture_replay=True,
+                eval_workers=args.eval_workers,
             )
             eval_metrics = {
                 "type": "eval",
@@ -465,6 +528,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--target-update", type=int, default=1000)
     parser.add_argument("--eval-interval", type=int, default=25)
     parser.add_argument("--eval-seeds", type=int, default=200)
+    parser.add_argument("--eval-workers", type=int, default=0, help="Evaluation worker processes. Use 0 for auto.")
     parser.add_argument("--milestone-seconds", type=float, default=60.0)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--output-dir", default="runs/tetris-agent")

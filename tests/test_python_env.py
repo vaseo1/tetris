@@ -9,7 +9,7 @@ from pathlib import Path
 from tetris_ai.afterstates import apply_actions, enumerate_placements
 from tetris_ai.engine import ACTIONS, COLS, ROWS, Piece, create_game, get_state, step_game
 from tetris_ai.features import FEATURE_SIZE, board_metrics, feature_vector
-from tetris_ai.train import evaluate
+from tetris_ai.train import evaluate, resolved_eval_workers
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -93,6 +93,11 @@ class AfterstateTest(unittest.TestCase):
 
 
 class TrainingSmokeTest(unittest.TestCase):
+    def test_eval_worker_resolution(self):
+        self.assertEqual(resolved_eval_workers(1, 200), 1)
+        self.assertEqual(resolved_eval_workers(8, 2), 2)
+        self.assertGreaterEqual(resolved_eval_workers(0, 200), 1)
+
     def test_evaluation_reports_score_stats(self):
         class DummyTorch:
             class no_grad:
