@@ -9,6 +9,7 @@ from pathlib import Path
 from tetris_ai.afterstates import apply_actions, enumerate_placements
 from tetris_ai.engine import ACTIONS, COLS, ROWS, Piece, create_game, get_state, step_game
 from tetris_ai.features import FEATURE_SIZE, board_metrics, feature_vector
+from tetris_ai.train import evaluate
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -92,6 +93,42 @@ class AfterstateTest(unittest.TestCase):
 
 
 class TrainingSmokeTest(unittest.TestCase):
+    def test_evaluation_reports_score_stats(self):
+        class DummyTorch:
+            class no_grad:
+                def __enter__(self):
+                    return None
+
+                def __exit__(self, *args):
+                    return None
+
+            @staticmethod
+            def tensor(values, **_kwargs):
+                return values
+
+            @staticmethod
+            def argmax(_values):
+                class Index:
+                    @staticmethod
+                    def item():
+                        return 0
+
+                return Index()
+
+            float32 = "float32"
+
+        class DummyModel:
+            def __call__(self, batch):
+                return [0 for _ in batch]
+
+        result = evaluate(DummyModel(), DummyTorch, "cpu", ["score-stats"], 1.4)
+
+        self.assertIn("meanScore", result)
+        self.assertIn("medianScore", result)
+        self.assertIn("maxScore", result)
+        self.assertIn("meanLinesCleared", result)
+        self.assertIn("maxLinesCleared", result)
+
     def test_tiny_training_run_writes_artifacts_when_torch_is_available(self):
         if shutil.which("python3") is None:
             self.skipTest("python3 is not available")
@@ -132,6 +169,53 @@ class TrainingSmokeTest(unittest.TestCase):
             self.assertTrue((Path(tmp) / "metrics.jsonl").exists())
             self.assertTrue((Path(tmp) / "latest-model.json").exists())
             self.assertTrue((Path(tmp) / "best-replay.json").exists())
+            self.assertTrue((Path(tmp) / "checkpoint.pt").exists())
+
+    def test_training_resume_continues_from_checkpoint_when_torch_is_available(self):
+        probe = subprocess.run(
+            [sys.executable, "-c", "import torch"],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+        )
+        if probe.returncode != 0:
+            self.skipTest("PyTorch is not installed")
+
+        base_command = [
+            sys.executable,
+            "-m",
+            "tetris_ai.train",
+            "--episodes",
+            "1",
+            "--max-pieces",
+            "4",
+            "--batch-size",
+            "2",
+            "--eval-interval",
+            "1",
+            "--eval-seeds",
+            "2",
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            subprocess.run(
+                [*base_command, "--output-dir", tmp],
+                check=True,
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+            )
+            resumed = subprocess.run(
+                [*base_command, "--output-dir", tmp, "--resume"],
+                check=True,
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+            )
+
+            self.assertIn("Resumed checkpoint from episode 1", resumed.stdout)
+            metrics = (Path(tmp) / "metrics.jsonl").read_text(encoding="utf-8")
+            self.assertIn('"episode": 0', metrics)
+            self.assertIn('"episode": 1', metrics)
 
 
 if __name__ == "__main__":

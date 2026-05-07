@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import random
 import time
 from collections import deque
@@ -63,6 +64,22 @@ class PrioritizedReplay:
     def update_priorities(self, indices: list[int], priorities) -> None:
         for index, priority in zip(indices, priorities):
             self.priorities[index] = float(abs(priority)) + 1e-5
+
+    def state_dict(self) -> dict[str, Any]:
+        return {
+            "capacity": self.capacity,
+            "alpha": self.alpha,
+            "items": [asdict(item) for item in self.items],
+            "priorities": self.priorities,
+            "next_index": self.next_index,
+        }
+
+    def load_state_dict(self, state: dict[str, Any]) -> None:
+        self.capacity = int(state["capacity"])
+        self.alpha = float(state["alpha"])
+        self.items = [Transition(**item) for item in state["items"]]
+        self.priorities = [float(priority) for priority in state["priorities"]]
+        self.next_index = int(state["next_index"])
 
 
 def choose_placement(model, torch, device, game: Game, epsilon: float) -> Placement | None:
@@ -137,6 +154,47 @@ def export_model(model, torch, path: Path) -> None:
     model.to(best_device(torch))
 
 
+def checkpoint_payload(
+    model,
+    target_model,
+    optimizer,
+    replay: PrioritizedReplay,
+    episode_index: int,
+    global_step: int,
+    best_median: float,
+    best_top_out: float,
+    recent_losses: deque,
+    args,
+) -> dict[str, Any]:
+    return {
+        "version": 1,
+        "episodeIndex": episode_index,
+        "globalStep": global_step,
+        "model": model.state_dict(),
+        "targetModel": target_model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "replay": replay.state_dict(),
+        "bestMedian": best_median,
+        "bestTopOut": best_top_out,
+        "recentLosses": list(recent_losses),
+        "randomState": random.getstate(),
+        "args": vars(args),
+    }
+
+
+def save_checkpoint(torch, checkpoint_path: Path, payload: dict[str, Any]) -> None:
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = checkpoint_path.with_suffix(".tmp")
+    torch.save(payload, temporary_path)
+    os.replace(temporary_path, checkpoint_path)
+
+
+def load_checkpoint(torch, checkpoint_path: Path) -> dict[str, Any] | None:
+    if not checkpoint_path.exists():
+        return None
+    return torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+
+
 def evaluate(model, torch, device, seeds: list[Any], max_seconds: float, capture_replay: bool = False):
     episodes = []
     best_replay = None
@@ -178,14 +236,31 @@ def evaluate(model, torch, device, seeds: list[Any], max_seconds: float, capture
             }
 
     success_rate = mean(1.0 if episode["survivalSeconds"] >= max_seconds else 0.0 for episode in episodes)
+    scores = [episode["score"] for episode in episodes]
+    lines = [episode["linesCleared"] for episode in episodes]
     return {
         "successRate": success_rate,
         "meanSurvivalSeconds": mean(episode["survivalSeconds"] for episode in episodes),
         "medianSurvivalSeconds": median(episode["survivalSeconds"] for episode in episodes),
         "topOutRate": mean(1.0 if episode["gameOver"] else 0.0 for episode in episodes),
+        "meanScore": mean(scores),
+        "medianScore": median(scores),
+        "maxScore": max(scores),
+        "meanLinesCleared": mean(lines),
+        "maxLinesCleared": max(lines),
         "episodes": episodes,
         "replay": best_replay,
     }
+
+
+def print_training_legend(args) -> None:
+    print("Training output guide:")
+    print(f"  eval_success = fraction of held-out seeds that survive {args.milestone_seconds:.0f}s;")
+    print("  median = median survival time;")
+    print("  mean_score/median_score/max_score = held-out evaluation scores;")
+    print("Resume hint:")
+    print(f"  uv run npm run train:ai -- --resume --episodes {args.episodes};")
+    print("  uv run python -m tetris_ai.train --resume --episodes N;")
 
 
 def run(args) -> None:
@@ -194,6 +269,7 @@ def run(args) -> None:
     device = best_device(torch)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    print_training_legend(args)
 
     model = make_value_net().to(device)
     target_model = make_value_net().to(device)
@@ -203,9 +279,32 @@ def run(args) -> None:
     metrics_path = output_dir / "metrics.jsonl"
     best_model_path = output_dir / "best-model.json"
     best_replay_path = output_dir / "best-replay.json"
+    checkpoint_path = output_dir / "checkpoint.pt"
     best_median = -1.0
     best_top_out = 1.0
     recent_losses = deque(maxlen=100)
+    global_step = 0
+    start_episode = 0
+
+    if args.resume:
+        checkpoint = load_checkpoint(torch, checkpoint_path)
+        if checkpoint is None:
+            print(f"No checkpoint found at {checkpoint_path}; starting a fresh run.")
+        else:
+            model.load_state_dict(checkpoint["model"])
+            target_model.load_state_dict(checkpoint["targetModel"])
+            optimizer.load_state_dict(checkpoint["optimizer"])
+            replay.load_state_dict(checkpoint["replay"])
+            best_median = float(checkpoint["bestMedian"])
+            best_top_out = float(checkpoint["bestTopOut"])
+            recent_losses = deque(checkpoint.get("recentLosses", []), maxlen=100)
+            global_step = int(checkpoint["globalStep"])
+            start_episode = int(checkpoint["episodeIndex"]) + 1
+            random.setstate(checkpoint["randomState"])
+            print(
+                f"Resumed checkpoint from episode {start_episode} "
+                f"at step {global_step}."
+            )
 
     writer = None
     try:
@@ -215,9 +314,11 @@ def run(args) -> None:
     except ModuleNotFoundError:
         writer = None
 
-    global_step = 0
     start = time.time()
-    for episode_index in range(args.episodes):
+    final_episode_index = start_episode - 1
+    target_episode = start_episode + args.episodes
+    for episode_index in range(start_episode, target_episode):
+        final_episode_index = episode_index
         game = create_game(f"train-{args.seed}-{episode_index}")
         episode_reward = 0.0
         pieces = 0
@@ -285,6 +386,10 @@ def run(args) -> None:
                 writer.add_scalar("eval/successRate", eval_result["successRate"], episode_index)
                 writer.add_scalar("eval/medianSurvivalSeconds", eval_result["medianSurvivalSeconds"], episode_index)
                 writer.add_scalar("eval/topOutRate", eval_result["topOutRate"], episode_index)
+                writer.add_scalar("eval/meanScore", eval_result["meanScore"], episode_index)
+                writer.add_scalar("eval/medianScore", eval_result["medianScore"], episode_index)
+                writer.add_scalar("eval/maxScore", eval_result["maxScore"], episode_index)
+                writer.add_scalar("eval/meanLinesCleared", eval_result["meanLinesCleared"], episode_index)
 
             improved = (
                 eval_result["medianSurvivalSeconds"] >= best_median + 10.0
@@ -297,13 +402,49 @@ def run(args) -> None:
                 if eval_result["replay"]:
                     best_replay_path.write_text(json.dumps(eval_result["replay"]), encoding="utf-8")
 
+            save_checkpoint(
+                torch,
+                checkpoint_path,
+                checkpoint_payload(
+                    model,
+                    target_model,
+                    optimizer,
+                    replay,
+                    episode_index,
+                    global_step,
+                    best_median,
+                    best_top_out,
+                    recent_losses,
+                    args,
+                ),
+            )
+
             print(
                 f"episode={episode_index + 1} step={global_step} "
                 f"eval_success={eval_result['successRate']:.3f} "
-                f"median={eval_result['medianSurvivalSeconds']:.1f}s"
+                f"median={eval_result['medianSurvivalSeconds']:.1f}s "
+                f"mean_score={eval_result['meanScore']:.1f} "
+                f"median_score={eval_result['medianScore']:.1f} "
+                f"max_score={eval_result['maxScore']}"
             )
 
     export_model(model, torch, output_dir / "latest-model.json")
+    save_checkpoint(
+        torch,
+        checkpoint_path,
+        checkpoint_payload(
+            model,
+            target_model,
+            optimizer,
+            replay,
+            final_episode_index,
+            global_step,
+            best_median,
+            best_top_out,
+            recent_losses,
+            args,
+        ),
+    )
     if writer:
         writer.close()
 
@@ -327,6 +468,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--milestone-seconds", type=float, default=60.0)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--output-dir", default="runs/tetris-agent")
+    parser.add_argument("--resume", action="store_true", help="Continue from output-dir/checkpoint.pt when present.")
     return parser
 
 
