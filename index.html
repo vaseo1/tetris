@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Oldschool Tetris</title>
+  </head>
+  <body>
+    <main id="app" class="tetris-shell">
+      <section class="device" aria-label="Oldschool Tetris game">
+        <header class="device__top">
+          <div class="brand">BRICK GAME</div>
+          <div class="signal" aria-hidden="true">
+            <span></span>
+            <span></span>
+            <span></span>
+          </div>
+        </header>
+
+        <div class="screen">
+          <div class="screen__left">
+            <canvas id="board" width="300" height="600" aria-label="Tetris board"></canvas>
+          </div>
+
+          <aside class="screen__right">
+            <div class="panel">
+              <span class="panel__label">SCORE</span>
+              <strong id="score">0000</strong>
+            </div>
+
+            <div class="panel panel--preview">
+              <span class="panel__label">NEXT</span>
+              <canvas id="next" width="120" height="120" aria-label="Next piece"></canvas>
+            </div>
+
+            <div class="status" id="status">READY</div>
+          </aside>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
