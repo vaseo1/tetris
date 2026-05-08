@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .engine import ACTIONS, Game, clone_game, collides, rotate, step_game
+from .engine import ACTIONS, Game, clone_game, collides, hard_drop, move, rotate, step_game
 from .features import board_metrics, feature_vector
 
 
@@ -16,14 +16,10 @@ class Placement:
     reward: float
     done: bool
     next_piece: str
-
-    @property
-    def vector(self) -> list[float]:
-        return feature_vector([list(row) for row in self.board], self.next_piece, self.cleared)
+    vector: list[float]
 
 
-def reward_for(board: list[list[int]], cleared: int, done: bool) -> float:
-    metrics = board_metrics(board)
+def reward_from_metrics(metrics: dict[str, int], cleared: int, done: bool) -> float:
     line_reward = [0.0, 1.0, 3.0, 5.0, 8.0][min(4, cleared)]
     return (
         0.08
@@ -35,10 +31,24 @@ def reward_for(board: list[list[int]], cleared: int, done: bool) -> float:
     )
 
 
+def reward_for(board: list[list[int]], cleared: int, done: bool) -> float:
+    return reward_from_metrics(board_metrics(board), cleared, done)
+
+
 def apply_actions(game: Game, actions: tuple[str, ...]) -> Game:
     clone = clone_game(game)
     for action in actions:
-        step_game(clone, action)
+        clone.last_cleared = 0
+        if action == ACTIONS["left"]:
+            move(clone, -1, 0)
+        elif action == ACTIONS["right"]:
+            move(clone, 1, 0)
+        elif action == ACTIONS["rotate"]:
+            rotate(clone)
+        elif action == ACTIONS["hardDrop"]:
+            hard_drop(clone)
+        else:
+            step_game(clone, action, capture_state=False)
     return clone
 
 
@@ -62,14 +72,14 @@ def enumerate_placements(game: Game) -> list[Placement]:
 
             while candidate.active_piece.x > target_x:
                 before = candidate.active_piece.x
-                step_game(candidate, ACTIONS["left"])
+                move(candidate, -1, 0)
                 if candidate.active_piece.x == before:
                     break
                 horizontal_actions.append(ACTIONS["left"])
 
             while candidate.active_piece.x < target_x:
                 before = candidate.active_piece.x
-                step_game(candidate, ACTIONS["right"])
+                move(candidate, 1, 0)
                 if candidate.active_piece.x == before:
                     break
                 horizontal_actions.append(ACTIONS["right"])
@@ -77,7 +87,7 @@ def enumerate_placements(game: Game) -> list[Placement]:
             if candidate.active_piece.x != target_x or collides(candidate, candidate.active_piece):
                 continue
 
-            step_game(candidate, ACTIONS["hardDrop"])
+            hard_drop(candidate)
             board_key = tuple(tuple(row) for row in candidate.board)
             if board_key in seen:
                 continue
@@ -85,6 +95,7 @@ def enumerate_placements(game: Game) -> list[Placement]:
 
             actions = tuple(rotation_actions + horizontal_actions + [ACTIONS["hardDrop"]])
             cleared = candidate.last_cleared
+            metrics = board_metrics(candidate.board)
             placements.append(
                 Placement(
                     actions=actions,
@@ -92,9 +103,10 @@ def enumerate_placements(game: Game) -> list[Placement]:
                     target_x=target_x,
                     board=board_key,
                     cleared=cleared,
-                    reward=reward_for(candidate.board, cleared, candidate.game_over),
+                    reward=reward_from_metrics(metrics, cleared, candidate.game_over),
                     done=candidate.game_over,
                     next_piece=candidate.active_piece.name,
+                    vector=feature_vector(candidate.board, candidate.active_piece.name, cleared, metrics=metrics),
                 )
             )
 

@@ -7,8 +7,9 @@ import unittest
 from pathlib import Path
 
 from tetris_ai.afterstates import apply_actions, enumerate_placements
-from tetris_ai.engine import ACTIONS, COLS, ROWS, Piece, create_game, get_state, step_game
+from tetris_ai.engine import ACTIONS, COLS, ROWS, Piece, clone_game, create_game, get_state, hard_drop, soft_drop, step_game
 from tetris_ai.features import FEATURE_SIZE, board_metrics, feature_vector
+from tetris_ai.model import best_device, make_value_net, require_torch
 from tetris_ai.train import evaluate, resolved_eval_workers
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,7 +29,8 @@ def js_state(seed, actions=()):
 def py_state(seed, actions=()):
     game = create_game(seed)
     for action in actions:
-        step_game(game, ACTIONS.get(action, action))
+        resolved_action = ACTIONS[action] if action in ACTIONS else action
+        step_game(game, resolved_action)
     return get_state(game)
 
 
@@ -67,6 +69,33 @@ class PythonEngineParityTest(unittest.TestCase):
         step_game(game, ACTIONS["hardDrop"])
 
         self.assertEqual(get_state(game), js_scenario("top-out"))
+
+    def test_hard_drop_matches_repeated_soft_drops(self):
+        prefixes = [
+            (),
+            (ACTIONS["left"],),
+            (ACTIONS["rotate"], ACTIONS["left"]),
+            (ACTIONS["right"], ACTIONS["right"], ACTIONS["rotate"]),
+        ]
+
+        for seed in (7, "hard-drop-a", "hard-drop-b"):
+            for prefix in prefixes:
+                with self.subTest(seed=seed, prefix=prefix):
+                    game = create_game(seed)
+                    for action in prefix:
+                        step_game(game, action)
+
+                    hard_game = clone_game(game)
+                    soft_game = clone_game(game)
+
+                    hard_drop(hard_game)
+                    while not soft_game.game_over:
+                        active_piece = soft_game.active_piece
+                        soft_drop(soft_game)
+                        if soft_game.active_piece is not active_piece:
+                            break
+
+                    self.assertEqual(get_state(hard_game), get_state(soft_game))
 
 
 class AfterstateTest(unittest.TestCase):
@@ -134,6 +163,28 @@ class TrainingSmokeTest(unittest.TestCase):
         self.assertIn("meanLinesCleared", result)
         self.assertIn("maxLinesCleared", result)
 
+    def test_parallel_evaluation_runs_when_torch_is_available(self):
+        try:
+            torch, _ = require_torch()
+        except SystemExit:
+            self.skipTest("PyTorch is not installed")
+
+        device = best_device(torch)
+        model = make_value_net().to(device)
+        model.eval()
+
+        result = evaluate(
+            model,
+            torch,
+            device,
+            ["parallel-eval-0", "parallel-eval-1", "parallel-eval-2", "parallel-eval-3"],
+            0.2,
+            eval_workers=2,
+        )
+
+        self.assertIn("episodes", result)
+        self.assertEqual(len(result["episodes"]), 4)
+
     def test_tiny_training_run_writes_artifacts_when_torch_is_available(self):
         if shutil.which("python3") is None:
             self.skipTest("python3 is not available")
@@ -171,10 +222,19 @@ class TrainingSmokeTest(unittest.TestCase):
                 text=True,
                 capture_output=True,
             )
+            metrics_lines = [
+                json.loads(line)
+                for line in (Path(tmp) / "metrics.jsonl").read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            train_metrics = next(metric for metric in metrics_lines if metric["type"] == "trainEpisode")
             self.assertTrue((Path(tmp) / "metrics.jsonl").exists())
             self.assertTrue((Path(tmp) / "latest-model.json").exists())
             self.assertTrue((Path(tmp) / "best-replay.json").exists())
             self.assertTrue((Path(tmp) / "checkpoint.pt").exists())
+            self.assertIn("stepsPerSecond", train_metrics)
+            self.assertIn("stepsPerHour", train_metrics)
+            self.assertIn("episodesPerHour", train_metrics)
 
     def test_training_resume_continues_from_checkpoint_when_torch_is_available(self):
         probe = subprocess.run(

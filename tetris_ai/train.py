@@ -98,6 +98,23 @@ def choose_placement(model, torch, device, game: Game, epsilon: float) -> Placem
         return placements[int(torch.argmax(values).item())]
 
 
+def serialize_model_state(model, torch) -> dict[str, dict[str, Any]]:
+    return {
+        key: {
+            "values": value.detach().cpu().tolist(),
+            "dtype": str(value.dtype).removeprefix("torch."),
+        }
+        for key, value in model.state_dict().items()
+    }
+
+
+def deserialize_model_state(torch, model_state: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    return {
+        key: torch.tensor(value["values"], dtype=getattr(torch, value["dtype"]))
+        for key, value in model_state.items()
+    }
+
+
 def next_vectors(game: Game) -> list[list[float]]:
     return [placement.vector for placement in enumerate_placements(game)]
 
@@ -237,13 +254,23 @@ def evaluate_seed(model, torch, device, seed: Any, max_seconds: float, capture_r
     return result, replay
 
 
-def init_eval_worker(model_state: dict[str, Any]) -> None:
+def performance_metrics(global_step: int, completed_episodes: int, elapsed_seconds: float) -> dict[str, float]:
+    safe_elapsed_seconds = max(elapsed_seconds, 1e-9)
+    return {
+        "elapsedSeconds": elapsed_seconds,
+        "stepsPerSecond": global_step / safe_elapsed_seconds,
+        "stepsPerHour": (global_step * 3600.0) / safe_elapsed_seconds,
+        "episodesPerHour": (completed_episodes * 3600.0) / safe_elapsed_seconds,
+    }
+
+
+def init_eval_worker(model_state: dict[str, dict[str, Any]]) -> None:
     global _EVAL_DEVICE, _EVAL_MODEL, _EVAL_TORCH
     _EVAL_TORCH, _ = require_torch()
     _EVAL_TORCH.set_num_threads(1)
     _EVAL_DEVICE = _EVAL_TORCH.device("cpu")
     _EVAL_MODEL = make_value_net().to(_EVAL_DEVICE)
-    _EVAL_MODEL.load_state_dict(model_state)
+    _EVAL_MODEL.load_state_dict(deserialize_model_state(_EVAL_TORCH, model_state))
     _EVAL_MODEL.eval()
 
 
@@ -282,7 +309,7 @@ def evaluate(
             for index, seed in enumerate(seeds)
         ]
     else:
-        model_state = {key: value.detach().cpu() for key, value in model.state_dict().items()}
+        model_state = serialize_model_state(model, torch)
         tasks = [
             (seed, max_seconds, capture_replay and index == 0)
             for index, seed in enumerate(seeds)
@@ -376,7 +403,7 @@ def run(args) -> None:
     except ModuleNotFoundError:
         writer = None
 
-    start = time.time()
+    start = time.perf_counter()
     final_episode_index = start_episode - 1
     target_episode = start_episode + args.episodes
     for episode_index in range(start_episode, target_episode):
@@ -404,6 +431,12 @@ def run(args) -> None:
             if global_step % args.target_update == 0:
                 target_model.load_state_dict(model.state_dict())
 
+        elapsed_seconds = time.perf_counter() - start
+        throughput = performance_metrics(
+            global_step,
+            episode_index - start_episode + 1,
+            elapsed_seconds,
+        )
         metrics = {
             "type": "trainEpisode",
             "episode": episode_index,
@@ -416,7 +449,7 @@ def run(args) -> None:
             "gameOver": game.game_over,
             "loss": mean(recent_losses) if recent_losses else None,
             "device": str(device),
-            "elapsedSeconds": time.time() - start,
+            **throughput,
         }
         with metrics_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(metrics) + "\n")
@@ -424,6 +457,9 @@ def run(args) -> None:
             writer.add_scalar("train/reward", episode_reward, episode_index)
             writer.add_scalar("train/pieces", pieces, episode_index)
             writer.add_scalar("train/epsilon", epsilon, episode_index)
+            writer.add_scalar("train/stepsPerSecond", throughput["stepsPerSecond"], episode_index)
+            writer.add_scalar("train/stepsPerHour", throughput["stepsPerHour"], episode_index)
+            writer.add_scalar("train/episodesPerHour", throughput["episodesPerHour"], episode_index)
             if recent_losses:
                 writer.add_scalar("train/loss", mean(recent_losses), episode_index)
 
@@ -441,6 +477,7 @@ def run(args) -> None:
                 "type": "eval",
                 "episode": episode_index,
                 "step": global_step,
+                **throughput,
                 **{key: value for key, value in eval_result.items() if key not in ("episodes", "replay")},
             }
             with metrics_path.open("a", encoding="utf-8") as handle:
@@ -453,6 +490,8 @@ def run(args) -> None:
                 writer.add_scalar("eval/medianScore", eval_result["medianScore"], episode_index)
                 writer.add_scalar("eval/maxScore", eval_result["maxScore"], episode_index)
                 writer.add_scalar("eval/meanLinesCleared", eval_result["meanLinesCleared"], episode_index)
+                writer.add_scalar("eval/stepsPerSecond", throughput["stepsPerSecond"], episode_index)
+                writer.add_scalar("eval/stepsPerHour", throughput["stepsPerHour"], episode_index)
 
             improved = (
                 eval_result["medianSurvivalSeconds"] >= best_median + 10.0
@@ -484,6 +523,7 @@ def run(args) -> None:
 
             print(
                 f"episode={episode_index + 1} step={global_step} "
+                f"steps_per_hour={throughput['stepsPerHour']:.0f} "
                 f"eval_success={eval_result['successRate']:.3f} "
                 f"median={eval_result['medianSurvivalSeconds']:.1f}s "
                 f"mean_score={eval_result['meanScore']:.1f} "

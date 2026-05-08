@@ -60,7 +60,7 @@ def normalize_seed(seed: Any | None = None) -> int:
 
         return random.randrange(0x100000000)
 
-    if isinstance(seed, int | float) and seed == seed and seed not in (float("inf"), float("-inf")):
+    if isinstance(seed, (int, float)) and seed == seed and seed not in (float("inf"), float("-inf")):
         return int(seed) & 0xFFFFFFFF
 
     text = str(seed)
@@ -231,16 +231,40 @@ def soft_drop(game: Game) -> bool:
     return True
 
 
+def drop_distance(game: Game, piece: Piece) -> int:
+    bottom_cells: dict[int, int] = {}
+    for cell_x, cell_y in piece.cells:
+        board_x = piece.x + cell_x
+        board_y = piece.y + cell_y
+        previous = bottom_cells.get(board_x)
+        if previous is None or board_y > previous:
+            bottom_cells[board_x] = board_y
+
+    max_drop: int | None = None
+    for board_x, board_y in bottom_cells.items():
+        drop = 0
+        next_y = board_y + 1
+        while next_y < ROWS and not game.board[next_y][board_x]:
+            drop += 1
+            next_y += 1
+        if max_drop is None or drop < max_drop:
+            max_drop = drop
+    return 0 if max_drop is None else max_drop
+
+
 def hard_drop(game: Game) -> bool:
     if not can_play(game):
         return False
-    while not collides(game, game.active_piece, 0, 1):
-        game.active_piece.y += 1
+    game.active_piece.y += drop_distance(game, game.active_piece)
     lock_piece(game)
     return True
 
 
-def step_game(game: Game, action: str = ACTIONS["noop"]) -> dict[str, Any]:
+def step_game(
+    game: Game,
+    action: str = ACTIONS["noop"],
+    capture_state: bool = True,
+) -> dict[str, Any] | None:
     game.last_cleared = 0
     if action == ACTIONS["left"]:
         move(game, -1, 0)
@@ -264,10 +288,12 @@ def step_game(game: Game, action: str = ACTIONS["noop"]) -> dict[str, Any]:
             set_status(game, "PLAY")
     else:
         raise ValueError(f"Unknown Tetris action: {action}")
-    return get_state(game)
+    if capture_state:
+        return get_state(game)
+    return None
 
 
-def advance_gravity(game: Game, ticks: int = 1) -> dict[str, Any]:
+def advance_gravity(game: Game, ticks: int = 1, capture_state: bool = True) -> dict[str, Any] | None:
     count = max(0, int(ticks))
     game.last_cleared = 0
     for _ in range(count):
@@ -275,7 +301,9 @@ def advance_gravity(game: Game, ticks: int = 1) -> dict[str, Any]:
             break
         game.gravity_ticks += 1
         soft_drop(game)
-    return get_state(game)
+    if capture_state:
+        return get_state(game)
+    return None
 
 
 def get_state(game: Game) -> dict[str, Any]:

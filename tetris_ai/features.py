@@ -67,18 +67,23 @@ def board_metrics(board: list[list[int]]) -> dict[str, int]:
     }
 
 
-def feature_vector(board: list[list[int]], next_piece_name: str, cleared: int = 0) -> list[float]:
+def feature_vector(
+    board: list[list[int]],
+    next_piece_name: str,
+    cleared: int = 0,
+    metrics: dict[str, int] | None = None,
+) -> list[float]:
     flat = [float(cell) for row in board for cell in row]
     one_hot = [1.0 if piece == next_piece_name else 0.0 for piece in PIECES]
-    metrics = board_metrics(board)
+    resolved_metrics = board_metrics(board) if metrics is None else metrics
     extras = [
         cleared / 4.0,
-        metrics["holes"] / 80.0,
-        metrics["maxHeight"] / ROWS,
-        metrics["aggregateHeight"] / (ROWS * COLS),
-        metrics["bumpiness"] / (ROWS * COLS),
-        metrics["completeLines"] / 4.0,
-        metrics["wells"] / (ROWS * COLS),
-        metrics["filledCells"] / (ROWS * COLS),
+        resolved_metrics["holes"] / 80.0,
+        resolved_metrics["maxHeight"] / ROWS,
+        resolved_metrics["aggregateHeight"] / (ROWS * COLS),
+        resolved_metrics["bumpiness"] / (ROWS * COLS),
+        resolved_metrics["completeLines"] / 4.0,
+        resolved_metrics["wells"] / (ROWS * COLS),
+        resolved_metrics["filledCells"] / (ROWS * COLS),
     ]
     return flat + one_hot + extras
