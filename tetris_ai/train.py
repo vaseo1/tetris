@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import math
 import os
@@ -19,6 +20,8 @@ from .features import FEATURE_SIZE, board_metrics
 from .model import best_device, make_value_net, require_torch
 
 GRAVITY_SECONDS = 0.7
+DEFAULT_CHECKPOINT_DIR = Path("checkpoints/tetris-agent")
+CHECKPOINT_FILENAME = "checkpoint.pt.gz"
 HELD_OUT_SEEDS = [f"heldout-{index}" for index in range(200)]
 _EVAL_MODEL = None
 _EVAL_TORCH = None
@@ -207,15 +210,26 @@ def checkpoint_payload(
 
 def save_checkpoint(torch, checkpoint_path: Path, payload: dict[str, Any]) -> None:
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path = checkpoint_path.with_suffix(".tmp")
-    torch.save(payload, temporary_path)
+    temporary_path = checkpoint_path.with_name(f"{checkpoint_path.name}.tmp")
+    if checkpoint_path.suffix == ".gz":
+        with gzip.open(temporary_path, "wb", compresslevel=6) as handle:
+            torch.save(payload, handle)
+    else:
+        torch.save(payload, temporary_path)
     os.replace(temporary_path, checkpoint_path)
 
 
 def load_checkpoint(torch, checkpoint_path: Path) -> dict[str, Any] | None:
     if not checkpoint_path.exists():
         return None
+    if checkpoint_path.suffix == ".gz":
+        with gzip.open(checkpoint_path, "rb") as handle:
+            return torch.load(handle, map_location="cpu", weights_only=False)
     return torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+
+
+def resolve_checkpoint_path(args) -> Path:
+    return Path(args.checkpoint_dir) / CHECKPOINT_FILENAME
 
 
 def evaluate_seed(model, torch, device, seed: Any, max_seconds: float, capture_replay: bool = False):
@@ -371,7 +385,7 @@ def run(args) -> None:
     metrics_path = output_dir / "metrics.jsonl"
     best_model_path = output_dir / "best-model.json"
     best_replay_path = output_dir / "best-replay.json"
-    checkpoint_path = output_dir / "checkpoint.pt"
+    checkpoint_path = resolve_checkpoint_path(args)
     best_median = -1.0
     best_top_out = 1.0
     best_score = -1.0
@@ -607,7 +621,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--score-survival-floor", type=float, default=0.70)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--output-dir", default="runs/tetris-agent")
-    parser.add_argument("--resume", action="store_true", help="Continue from output-dir/checkpoint.pt when present.")
+    parser.add_argument(
+        "--checkpoint-dir",
+        default=str(DEFAULT_CHECKPOINT_DIR),
+        help=f"Directory for compressed checkpoint data. Writes {CHECKPOINT_FILENAME} here.",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help=f"Continue from checkpoint-dir/{CHECKPOINT_FILENAME} when present.",
+    )
     return parser
 
 

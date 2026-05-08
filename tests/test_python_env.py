@@ -238,6 +238,8 @@ class TrainingSmokeTest(unittest.TestCase):
                     "2",
                     "--output-dir",
                     tmp,
+                    "--checkpoint-dir",
+                    str(Path(tmp) / "checkpoints"),
                 ],
                 check=True,
                 cwd=ROOT,
@@ -253,7 +255,7 @@ class TrainingSmokeTest(unittest.TestCase):
             self.assertTrue((Path(tmp) / "metrics.jsonl").exists())
             self.assertTrue((Path(tmp) / "latest-model.json").exists())
             self.assertTrue((Path(tmp) / "best-replay.json").exists())
-            self.assertTrue((Path(tmp) / "checkpoint.pt").exists())
+            self.assertTrue((Path(tmp) / "checkpoints" / "checkpoint.pt.gz").exists())
             self.assertIn("stepsPerSecond", train_metrics)
             self.assertIn("stepsPerHour", train_metrics)
             self.assertIn("episodesPerHour", train_metrics)
@@ -284,15 +286,16 @@ class TrainingSmokeTest(unittest.TestCase):
             "2",
         ]
         with tempfile.TemporaryDirectory() as tmp:
+            checkpoint_dir = Path(tmp) / "checkpoints"
             subprocess.run(
-                [*base_command, "--output-dir", tmp],
+                [*base_command, "--output-dir", tmp, "--checkpoint-dir", str(checkpoint_dir)],
                 check=True,
                 cwd=ROOT,
                 text=True,
                 capture_output=True,
             )
             resumed = subprocess.run(
-                [*base_command, "--output-dir", tmp, "--resume"],
+                [*base_command, "--output-dir", tmp, "--checkpoint-dir", str(checkpoint_dir), "--resume"],
                 check=True,
                 cwd=ROOT,
                 text=True,
