@@ -6,11 +6,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tetris_ai.afterstates import apply_actions, enumerate_placements
+from tetris_ai.afterstates import apply_actions, enumerate_placements, reward_from_metrics
 from tetris_ai.engine import ACTIONS, COLS, ROWS, Piece, clone_game, create_game, get_state, hard_drop, soft_drop, step_game
 from tetris_ai.features import FEATURE_SIZE, board_metrics, feature_vector
 from tetris_ai.model import best_device, make_value_net, require_torch
-from tetris_ai.train import evaluate, resolved_eval_workers
+from tetris_ai.train import evaluate, performance_metrics, resolved_eval_workers
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -120,12 +120,34 @@ class AfterstateTest(unittest.TestCase):
         self.assertIn("holes", metrics)
         self.assertIn("bumpiness", metrics)
 
+    def test_phase2_reward_increases_line_clear_incentive(self):
+        metrics = {
+            "holes": 0,
+            "maxHeight": 4,
+            "aggregateHeight": 12,
+            "bumpiness": 2,
+            "completeLines": 0,
+            "wells": 0,
+            "filledCells": 20,
+        }
+
+        survival_reward = reward_from_metrics(metrics, 4, False, "survival")
+        phase2_reward = reward_from_metrics(metrics, 4, False, "phase2-score")
+
+        self.assertGreater(phase2_reward, survival_reward)
+
 
 class TrainingSmokeTest(unittest.TestCase):
     def test_eval_worker_resolution(self):
         self.assertEqual(resolved_eval_workers(1, 200), 1)
         self.assertEqual(resolved_eval_workers(8, 2), 2)
         self.assertGreaterEqual(resolved_eval_workers(0, 200), 1)
+
+    def test_performance_metrics_use_completed_steps(self):
+        metrics = performance_metrics(100, 5, 3600.0)
+
+        self.assertEqual(metrics["stepsPerHour"], 100.0)
+        self.assertEqual(metrics["episodesPerHour"], 5.0)
 
     def test_evaluation_reports_score_stats(self):
         class DummyTorch:

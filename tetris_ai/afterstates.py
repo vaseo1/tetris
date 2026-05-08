@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from .engine import ACTIONS, Game, clone_game, collides, hard_drop, move, rotate, step_game
 from .features import board_metrics, feature_vector
 
+REWARD_PROFILES = ("survival", "phase2-score")
+
 
 @dataclass(frozen=True)
 class Placement:
@@ -19,7 +21,20 @@ class Placement:
     vector: list[float]
 
 
-def reward_from_metrics(metrics: dict[str, int], cleared: int, done: bool) -> float:
+def reward_from_metrics(metrics: dict[str, int], cleared: int, done: bool, reward_profile: str = "survival") -> float:
+    if reward_profile == "phase2-score":
+        line_reward = [0.0, 1.5, 4.0, 7.0, 12.0][min(4, cleared)]
+        return (
+            0.04
+            + line_reward
+            - 0.04 * metrics["holes"]
+            - 0.02 * metrics["maxHeight"]
+            - 0.012 * metrics["bumpiness"]
+            - (8.0 if done else 0.0)
+        )
+    if reward_profile != "survival":
+        raise ValueError(f"Unknown reward profile: {reward_profile}")
+
     line_reward = [0.0, 1.0, 3.0, 5.0, 8.0][min(4, cleared)]
     return (
         0.08
@@ -31,8 +46,8 @@ def reward_from_metrics(metrics: dict[str, int], cleared: int, done: bool) -> fl
     )
 
 
-def reward_for(board: list[list[int]], cleared: int, done: bool) -> float:
-    return reward_from_metrics(board_metrics(board), cleared, done)
+def reward_for(board: list[list[int]], cleared: int, done: bool, reward_profile: str = "survival") -> float:
+    return reward_from_metrics(board_metrics(board), cleared, done, reward_profile)
 
 
 def apply_actions(game: Game, actions: tuple[str, ...]) -> Game:
@@ -52,7 +67,7 @@ def apply_actions(game: Game, actions: tuple[str, ...]) -> Game:
     return clone
 
 
-def enumerate_placements(game: Game) -> list[Placement]:
+def enumerate_placements(game: Game, reward_profile: str = "survival") -> list[Placement]:
     if game.game_over or game.paused:
         return []
 
@@ -103,7 +118,7 @@ def enumerate_placements(game: Game) -> list[Placement]:
                     target_x=target_x,
                     board=board_key,
                     cleared=cleared,
-                    reward=reward_from_metrics(metrics, cleared, candidate.game_over),
+                    reward=reward_from_metrics(metrics, cleared, candidate.game_over, reward_profile),
                     done=candidate.game_over,
                     next_piece=candidate.active_piece.name,
                     vector=feature_vector(candidate.board, candidate.active_piece.name, cleared, metrics=metrics),

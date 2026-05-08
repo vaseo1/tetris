@@ -13,7 +13,7 @@ from pathlib import Path
 from statistics import mean, median
 from typing import Any
 
-from .afterstates import Placement, apply_actions, enumerate_placements
+from .afterstates import REWARD_PROFILES, Placement, apply_actions, enumerate_placements
 from .engine import Game, create_game, get_state
 from .features import FEATURE_SIZE, board_metrics
 from .model import best_device, make_value_net, require_torch
@@ -86,8 +86,8 @@ class PrioritizedReplay:
         self.next_index = int(state["next_index"])
 
 
-def choose_placement(model, torch, device, game: Game, epsilon: float) -> Placement | None:
-    placements = enumerate_placements(game)
+def choose_placement(model, torch, device, game: Game, epsilon: float, reward_profile: str = "survival") -> Placement | None:
+    placements = enumerate_placements(game, reward_profile)
     if not placements:
         return None
     if random.random() < epsilon:
@@ -115,8 +115,8 @@ def deserialize_model_state(torch, model_state: dict[str, dict[str, Any]]) -> di
     }
 
 
-def next_vectors(game: Game) -> list[list[float]]:
-    return [placement.vector for placement in enumerate_placements(game)]
+def next_vectors(game: Game, reward_profile: str = "survival") -> list[list[float]]:
+    return [placement.vector for placement in enumerate_placements(game, reward_profile)]
 
 
 def optimize(model, target_model, optimizer, replay: PrioritizedReplay, torch, device, args) -> float | None:
@@ -184,6 +184,7 @@ def checkpoint_payload(
     global_step: int,
     best_median: float,
     best_top_out: float,
+    best_score: float,
     recent_losses: deque,
     args,
 ) -> dict[str, Any]:
@@ -197,6 +198,7 @@ def checkpoint_payload(
         "replay": replay.state_dict(),
         "bestMedian": best_median,
         "bestTopOut": best_top_out,
+        "bestScore": best_score,
         "recentLosses": list(recent_losses),
         "randomState": random.getstate(),
         "args": vars(args),
@@ -254,12 +256,12 @@ def evaluate_seed(model, torch, device, seed: Any, max_seconds: float, capture_r
     return result, replay
 
 
-def performance_metrics(global_step: int, completed_episodes: int, elapsed_seconds: float) -> dict[str, float]:
+def performance_metrics(completed_steps: int, completed_episodes: int, elapsed_seconds: float) -> dict[str, float]:
     safe_elapsed_seconds = max(elapsed_seconds, 1e-9)
     return {
         "elapsedSeconds": elapsed_seconds,
-        "stepsPerSecond": global_step / safe_elapsed_seconds,
-        "stepsPerHour": (global_step * 3600.0) / safe_elapsed_seconds,
+        "stepsPerSecond": completed_steps / safe_elapsed_seconds,
+        "stepsPerHour": (completed_steps * 3600.0) / safe_elapsed_seconds,
         "episodesPerHour": (completed_episodes * 3600.0) / safe_elapsed_seconds,
     }
 
@@ -343,6 +345,7 @@ def evaluate(
 def print_training_legend(args) -> None:
     workers = "auto" if args.eval_workers == 0 else str(args.eval_workers)
     print("Training output guide:")
+    print(f"  reward_profile = {args.reward_profile};")
     print(f"  eval_success = fraction of held-out seeds that survive {args.milestone_seconds:.0f}s;")
     print("  median = median survival time;")
     print("  mean_score/median_score/max_score = held-out evaluation scores;")
@@ -371,6 +374,7 @@ def run(args) -> None:
     checkpoint_path = output_dir / "checkpoint.pt"
     best_median = -1.0
     best_top_out = 1.0
+    best_score = -1.0
     recent_losses = deque(maxlen=100)
     global_step = 0
     start_episode = 0
@@ -382,11 +386,21 @@ def run(args) -> None:
         else:
             model.load_state_dict(checkpoint["model"])
             target_model.load_state_dict(checkpoint["targetModel"])
-            optimizer.load_state_dict(checkpoint["optimizer"])
-            replay.load_state_dict(checkpoint["replay"])
+            if args.reset_optimizer_on_resume:
+                print("Reset optimizer state for resumed training.")
+            else:
+                optimizer.load_state_dict(checkpoint["optimizer"])
+            if args.reset_replay_on_resume:
+                print("Reset replay buffer for resumed training.")
+            else:
+                replay.load_state_dict(checkpoint["replay"])
             best_median = float(checkpoint["bestMedian"])
             best_top_out = float(checkpoint["bestTopOut"])
-            recent_losses = deque(checkpoint.get("recentLosses", []), maxlen=100)
+            best_score = float(checkpoint.get("bestScore", -1.0))
+            if args.reset_replay_on_resume or args.reset_optimizer_on_resume:
+                recent_losses = deque(maxlen=100)
+            else:
+                recent_losses = deque(checkpoint.get("recentLosses", []), maxlen=100)
             global_step = int(checkpoint["globalStep"])
             start_episode = int(checkpoint["episodeIndex"]) + 1
             random.setstate(checkpoint["randomState"])
@@ -404,6 +418,7 @@ def run(args) -> None:
         writer = None
 
     start = time.perf_counter()
+    start_step = global_step
     final_episode_index = start_episode - 1
     target_episode = start_episode + args.episodes
     for episode_index in range(start_episode, target_episode):
@@ -414,11 +429,18 @@ def run(args) -> None:
         epsilon = args.eps_end + (args.eps_start - args.eps_end) * math.exp(-global_step / args.eps_decay)
 
         while not game.game_over and pieces < args.max_pieces:
-            placement = choose_placement(model, torch, device, game, epsilon)
+            placement = choose_placement(model, torch, device, game, epsilon, args.reward_profile)
             if placement is None:
                 break
             next_game = apply_actions(game, placement.actions)
-            replay.add(Transition(placement.vector, placement.reward, next_vectors(next_game), placement.done))
+            replay.add(
+                Transition(
+                    placement.vector,
+                    placement.reward,
+                    next_vectors(next_game, args.reward_profile),
+                    placement.done,
+                )
+            )
             game = next_game
             episode_reward += placement.reward
             pieces += 1
@@ -433,7 +455,7 @@ def run(args) -> None:
 
         elapsed_seconds = time.perf_counter() - start
         throughput = performance_metrics(
-            global_step,
+            global_step - start_step,
             episode_index - start_episode + 1,
             elapsed_seconds,
         )
@@ -449,6 +471,7 @@ def run(args) -> None:
             "gameOver": game.game_over,
             "loss": mean(recent_losses) if recent_losses else None,
             "device": str(device),
+            "rewardProfile": args.reward_profile,
             **throughput,
         }
         with metrics_path.open("a", encoding="utf-8") as handle:
@@ -493,13 +516,18 @@ def run(args) -> None:
                 writer.add_scalar("eval/stepsPerSecond", throughput["stepsPerSecond"], episode_index)
                 writer.add_scalar("eval/stepsPerHour", throughput["stepsPerHour"], episode_index)
 
-            improved = (
-                eval_result["medianSurvivalSeconds"] >= best_median + 10.0
-                or eval_result["topOutRate"] < best_top_out
-            )
+            if args.best_model_objective == "score":
+                meets_floor = eval_result["successRate"] >= args.score_survival_floor
+                improved = meets_floor and eval_result["meanScore"] > best_score
+            else:
+                improved = (
+                    eval_result["medianSurvivalSeconds"] >= best_median + 10.0
+                    or eval_result["topOutRate"] < best_top_out
+                )
             if improved:
                 best_median = eval_result["medianSurvivalSeconds"]
                 best_top_out = eval_result["topOutRate"]
+                best_score = eval_result["meanScore"]
                 export_model(model, torch, best_model_path)
                 if eval_result["replay"]:
                     best_replay_path.write_text(json.dumps(eval_result["replay"]), encoding="utf-8")
@@ -516,6 +544,7 @@ def run(args) -> None:
                     global_step,
                     best_median,
                     best_top_out,
+                    best_score,
                     recent_losses,
                     args,
                 ),
@@ -544,6 +573,7 @@ def run(args) -> None:
             global_step,
             best_median,
             best_top_out,
+            best_score,
             recent_losses,
             args,
         ),
@@ -570,6 +600,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--eval-seeds", type=int, default=200)
     parser.add_argument("--eval-workers", type=int, default=0, help="Evaluation worker processes. Use 0 for auto.")
     parser.add_argument("--milestone-seconds", type=float, default=60.0)
+    parser.add_argument("--reward-profile", choices=REWARD_PROFILES, default="survival")
+    parser.add_argument("--reset-replay-on-resume", action="store_true")
+    parser.add_argument("--reset-optimizer-on-resume", action="store_true")
+    parser.add_argument("--best-model-objective", choices=("survival", "score"), default="survival")
+    parser.add_argument("--score-survival-floor", type=float, default=0.70)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--output-dir", default="runs/tetris-agent")
     parser.add_argument("--resume", action="store_true", help="Continue from output-dir/checkpoint.pt when present.")
