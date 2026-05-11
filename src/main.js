@@ -1,4 +1,5 @@
 import './style.css';
+import bestModelUrl from '../runs/tetris-agent/best-model.json?url';
 import { choosePlacement, loadModelFromUrl } from './agent.js';
 import {
   ACTIONS,
@@ -12,7 +13,7 @@ import {
 
 const CELL = 30;
 const GRAVITY_MS = 700;
-const DEFAULT_MODEL_URL = '/runs/tetris-agent/best-model.json';
+const DEFAULT_MODEL_URL = bestModelUrl;
 
 const COLORS = {
   empty: '#a7b9af',
