@@ -150,7 +150,7 @@ canvas {
 
 .agent-panel {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr;
   gap: 8px;
   padding: 10px;
   border: 3px solid #1d383a;
@@ -217,7 +217,7 @@ canvas {
 
   .agent-panel {
     grid-column: 1 / -1;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: 1fr;
   }
 
   #agent-status {

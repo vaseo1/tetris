@@ -252,27 +252,3 @@ export async function loadModelFromUrl(url) {
   }
   return parseAgentModel(await response.text());
 }
-
-export function createReplayController(replay) {
-  let index = 0;
-  const frames = Array.isArray(replay?.frames) ? replay.frames : [];
-
-  return {
-    get length() {
-      return frames.length;
-    },
-    get index() {
-      return index;
-    },
-    reset() {
-      index = 0;
-      return frames[index] ?? null;
-    },
-    next() {
-      if (!frames.length) return null;
-      const frame = frames[index];
-      index = Math.min(frames.length - 1, index + 1);
-      return frame;
-    },
-  };
-}
