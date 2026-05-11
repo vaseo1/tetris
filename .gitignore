@@ -1,6 +1,9 @@
 node_modules/
 dist/
-runs/
+runs/*
+!runs/tetris-agent/
+runs/tetris-agent/*
+!runs/tetris-agent/best-model.json
 .DS_Store
 .env
 .env.*
