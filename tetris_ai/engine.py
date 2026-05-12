@@ -281,7 +281,7 @@ def step_game(
             game.paused = not game.paused
             set_status(game, "PAUSED" if game.paused else "PLAY")
     elif action == ACTIONS["restart"]:
-        restarted = create_game(game.seed)
+        restarted = create_game()
         game.__dict__.update(restarted.__dict__)
     elif action == ACTIONS["noop"]:
         if can_play(game):

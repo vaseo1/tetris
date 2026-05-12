@@ -219,7 +219,7 @@ function startAi() {
 }
 
 async function toggleAi() {
-  resetGame({ seed: game.seed });
+  resetGame();
   setAgentStatus('LOAD MODEL');
 
   try {
@@ -264,7 +264,7 @@ window.addEventListener('keydown', (event) => {
   event.preventDefault();
 
   if (action === ACTIONS.restart) {
-    resetGame({ seed: game.seed });
+    resetGame();
   } else {
     applyAction(action);
   }

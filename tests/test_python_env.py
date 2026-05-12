@@ -1,4 +1,5 @@
 import json
+import random
 import shutil
 import subprocess
 import sys
@@ -52,6 +53,20 @@ class PythonEngineParityTest(unittest.TestCase):
     def test_representative_action_trace_matches_js(self):
         actions = ("left", "rotate", "right", "down", "hardDrop", "rotate", "hardDrop")
         self.assertEqual(py_state(42, actions), js_state(42, actions))
+
+    def test_restart_uses_fresh_seed(self):
+        game = create_game(7)
+        start_seed = game.seed
+        original_randrange = random.randrange
+        random.randrange = lambda _: 123456789
+        try:
+            step_game(game, ACTIONS["restart"])
+        finally:
+            random.randrange = original_randrange
+
+        state = get_state(game)
+        self.assertEqual(state["status"], "READY")
+        self.assertNotEqual(state["seed"], start_seed)
 
     def test_line_clear_scenario_matches_js(self):
         game = create_game(1)

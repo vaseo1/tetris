@@ -235,7 +235,7 @@ export function stepGame(game, action = ACTIONS.noop) {
       }
       break;
     case ACTIONS.restart: {
-      const restarted = createGame({ seed: game.seed });
+      const restarted = createGame();
       Object.assign(game, restarted);
       break;
     }

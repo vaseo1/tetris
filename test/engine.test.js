@@ -51,12 +51,18 @@ test('actions move, rotate, pause, and restart through the engine', () => {
   advanceGravity(game, 3);
   assert.equal(getGameState(game).activePiece.y, pausedY);
 
-  stepGame(game, ACTIONS.restart);
+  const originalRandom = Math.random;
+  Math.random = () => 0.25;
+  try {
+    stepGame(game, ACTIONS.restart);
+  } finally {
+    Math.random = originalRandom;
+  }
   const restarted = getGameState(game);
   assert.equal(restarted.score, 0);
   assert.equal(restarted.paused, false);
   assert.equal(restarted.status, 'READY');
-  assert.equal(pieceSignature(restarted.activePiece), pieceSignature(start.activePiece));
+  assert.notEqual(restarted.seed, start.seed);
 });
 
 test('soft drop and gravity lock pieces when they reach the floor', () => {
