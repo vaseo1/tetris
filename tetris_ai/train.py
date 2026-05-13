@@ -10,6 +10,7 @@ import time
 from collections import deque
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from statistics import mean, median
 from typing import Any
@@ -156,7 +157,18 @@ def optimize(model, target_model, optimizer, replay: PrioritizedReplay, torch, d
     return float(loss.item())
 
 
-def export_model(model, torch, path: Path) -> None:
+def iso_utc_now() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def model_export_metadata(episode_index: int, exported_at: str | None = None) -> dict[str, Any]:
+    return {
+        "episodes": episode_index + 1,
+        "exportedAt": exported_at or iso_utc_now(),
+    }
+
+
+def export_model(model, torch, path: Path, metadata: dict[str, Any] | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     model_cpu = model.to("cpu")
     state = model_cpu.state_dict()
@@ -175,6 +187,8 @@ def export_model(model, torch, path: Path) -> None:
         "layers": layers,
         "activation": "relu",
     }
+    if metadata is not None:
+        payload["metadata"] = metadata
     path.write_text(json.dumps(payload), encoding="utf-8")
     model.to(best_device(torch))
 
@@ -652,7 +666,7 @@ def run(args) -> None:
                     best_median = recovery_eval_result["medianSurvivalSeconds"]
                     best_top_out = recovery_eval_result["topOutRate"]
                     best_score = recovery_eval_result["meanScore"]
-                export_model(model, torch, best_model_path)
+                export_model(model, torch, best_model_path, model_export_metadata(episode_index))
                 if eval_result["replay"]:
                     best_replay_path.write_text(json.dumps(eval_result["replay"]), encoding="utf-8")
 
@@ -690,7 +704,7 @@ def run(args) -> None:
                     f"recovery_mean_score={recovery_eval_result['meanScore']:.1f}"
                 )
 
-    export_model(model, torch, output_dir / "latest-model.json")
+    export_model(model, torch, output_dir / "latest-model.json", model_export_metadata(final_episode_index))
     save_checkpoint(
         torch,
         checkpoint_path,

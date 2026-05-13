@@ -12,7 +12,7 @@ from tetris_ai.engine import ACTIONS, COLS, ROWS, Piece, clone_game, create_game
 from tetris_ai.features import FEATURE_SIZE, board_metrics, feature_vector
 from tetris_ai.model import best_device, make_value_net, require_torch
 from tetris_ai.recovery import create_recovery_game, make_recovery_board, recovery_summary
-from tetris_ai.train import create_start_game, evaluate, performance_metrics, resolved_eval_workers
+from tetris_ai.train import create_start_game, evaluate, model_export_metadata, performance_metrics, resolved_eval_workers
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -199,6 +199,12 @@ class TrainingSmokeTest(unittest.TestCase):
         self.assertEqual(metrics["stepsPerHour"], 100.0)
         self.assertEqual(metrics["episodesPerHour"], 5.0)
 
+    def test_model_export_metadata_uses_completed_episode_count(self):
+        metadata = model_export_metadata(episode_index=4, exported_at="2026-05-13T17:59:00Z")
+
+        self.assertEqual(metadata["episodes"], 5)
+        self.assertEqual(metadata["exportedAt"], "2026-05-13T17:59:00Z")
+
     def test_evaluation_reports_score_stats(self):
         class DummyTorch:
             class no_grad:
@@ -350,6 +356,9 @@ class TrainingSmokeTest(unittest.TestCase):
             self.assertIn("stepsPerSecond", train_metrics)
             self.assertIn("stepsPerHour", train_metrics)
             self.assertIn("episodesPerHour", train_metrics)
+            latest_model = json.loads((Path(tmp) / "latest-model.json").read_text(encoding="utf-8"))
+            self.assertEqual(latest_model["metadata"]["episodes"], 2)
+            self.assertRegex(latest_model["metadata"]["exportedAt"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 
     def test_training_resume_continues_from_checkpoint_when_torch_is_available(self):
         probe = subprocess.run(

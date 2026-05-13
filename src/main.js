@@ -31,6 +31,7 @@ const statusNode = document.querySelector('#status');
 const aiButton = document.querySelector('#ai-button');
 const agentTimeNode = document.querySelector('#agent-time');
 const agentStatusNode = document.querySelector('#agent-status');
+const agentMetadataNode = document.querySelector('#agent-metadata');
 const ctx = boardCanvas.getContext('2d');
 const nextCtx = nextCanvas.getContext('2d');
 
@@ -46,6 +47,29 @@ function formatElapsed(ms) {
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+}
+
+function formatModelDate(value) {
+  if (!value) return 'DATE --';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return 'DATE --';
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  const hours = String(date.getHours()).padStart(2, '0');
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  return `${month}/${day} ${hours}:${minutes}`;
+}
+
+function formatModelMetadata(model) {
+  const metadata = model?.metadata ?? {};
+  const episodes = Number.isInteger(metadata.episodes) ? String(metadata.episodes) : '--';
+  return `EP ${episodes} · ${formatModelDate(metadata.exportedAt)}`;
+}
+
+function setAgentMetadata(model) {
+  if (!agentMetadataNode) return;
+  agentMetadataNode.textContent = model ? formatModelMetadata(model) : 'EP -- · DATE --';
+  agentMetadataNode.hidden = !model;
 }
 
 function setAgentElapsed(ms) {
@@ -221,12 +245,15 @@ function startAi() {
 async function toggleAi() {
   resetGame();
   setAgentStatus('LOAD MODEL');
+  setAgentMetadata(null);
 
   try {
     agentModel = await loadModelFromUrl(DEFAULT_MODEL_URL);
+    setAgentMetadata(agentModel);
     startAi();
   } catch (error) {
     agentModel = null;
+    setAgentMetadata(null);
     setAgentStatus('NO MODEL');
     console.error(error);
   }

@@ -5,6 +5,7 @@ import {
   choosePlacement,
   enumeratePlacements,
   featureVector,
+  parseAgentModel,
 } from '../src/agent.js';
 import { createGame, getGameState, stepGame } from '../src/engine.js';
 
@@ -38,4 +39,40 @@ test('heuristic placement selector returns a legal action list', () => {
   assert.ok(placement);
   assert.ok(placement.actions.length > 0);
   assert.equal(placement.actions.at(-1), 'hardDrop');
+});
+
+test('model parser accepts old exports without metadata', () => {
+  const model = parseAgentModel(JSON.stringify({
+    type: 'afterstate-value-mlp',
+    inputSize: FEATURE_SIZE,
+    layers: [],
+  }));
+
+  assert.equal(model.metadata, undefined);
+});
+
+test('model parser preserves export metadata', () => {
+  const metadata = {
+    episodes: 5105,
+    exportedAt: '2026-05-13T17:59:00Z',
+  };
+  const model = parseAgentModel(JSON.stringify({
+    type: 'afterstate-value-mlp',
+    inputSize: FEATURE_SIZE,
+    layers: [],
+    metadata,
+  }));
+
+  assert.deepEqual(model.metadata, metadata);
+});
+
+test('model parser rejects unsupported models', () => {
+  assert.throws(
+    () => parseAgentModel(JSON.stringify({
+      type: 'afterstate-value-mlp',
+      inputSize: FEATURE_SIZE + 1,
+      layers: [],
+    })),
+    /Unsupported Tetris agent model/,
+  );
 });

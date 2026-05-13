@@ -176,7 +176,8 @@ canvas {
 }
 
 #agent-time,
-#agent-status {
+#agent-status,
+#agent-metadata {
   grid-column: 1 / -1;
   min-height: 22px;
   display: grid;
@@ -189,6 +190,15 @@ canvas {
 #agent-status {
   color: #38585a;
   font-size: 11px;
+}
+
+#agent-metadata {
+  color: #38585a;
+  font-size: 10px;
+}
+
+#agent-metadata[hidden] {
+  display: none;
 }
 
 @media (max-width: 560px) {
@@ -220,7 +230,8 @@ canvas {
     grid-template-columns: 1fr;
   }
 
-  #agent-status {
+  #agent-status,
+  #agent-metadata {
     grid-column: 1 / -1;
   }
 
