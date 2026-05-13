@@ -18,6 +18,7 @@ from .afterstates import REWARD_PROFILES, Placement, apply_actions, enumerate_pl
 from .engine import Game, create_game, get_state
 from .features import FEATURE_SIZE, board_metrics
 from .model import best_device, make_value_net, require_torch
+from .recovery import RECOVERY_SEVERITIES, create_recovery_game
 
 GRAVITY_SECONDS = 0.7
 DEFAULT_CHECKPOINT_DIR = Path("checkpoints/tetris-agent")
@@ -232,9 +233,32 @@ def resolve_checkpoint_path(args) -> Path:
     return Path(args.checkpoint_dir) / CHECKPOINT_FILENAME
 
 
-def evaluate_seed(model, torch, device, seed: Any, max_seconds: float, capture_replay: bool = False):
+def create_start_game(seed: Any, start_mode: str = "clean", recovery_severity: str = "medium") -> Game:
+    if start_mode == "clean":
+        return create_game(seed)
+    if start_mode == "recovery":
+        return create_recovery_game(seed, recovery_severity)
+    raise ValueError(f"Unknown start mode: {start_mode}")
+
+
+def choose_training_start_mode(args) -> str:
+    if args.recovery_start_rate <= 0:
+        return "clean"
+    return "recovery" if random.random() < args.recovery_start_rate else "clean"
+
+
+def evaluate_seed(
+    model,
+    torch,
+    device,
+    seed: Any,
+    max_seconds: float,
+    capture_replay: bool = False,
+    start_mode: str = "clean",
+    recovery_severity: str = "medium",
+):
     max_pieces = max(1, math.ceil(max_seconds / GRAVITY_SECONDS))
-    game = create_game(seed)
+    game = create_start_game(seed, start_mode, recovery_severity)
     frames = []
     pieces = 0
     while not game.game_over and pieces < max_pieces:
@@ -257,12 +281,15 @@ def evaluate_seed(model, torch, device, seed: Any, max_seconds: float, capture_r
         "maxHeight": metrics["maxHeight"],
         "holes": metrics["holes"],
         "bumpiness": metrics["bumpiness"],
+        "startMode": start_mode,
     }
     replay = None
     if capture_replay:
         replay = {
             "seed": str(seed),
             "gravitySeconds": GRAVITY_SECONDS,
+            "startMode": start_mode,
+            "recoverySeverity": recovery_severity if start_mode == "recovery" else None,
             "frames": frames,
             "finalState": get_state(game),
             "result": result,
@@ -291,8 +318,17 @@ def init_eval_worker(model_state: dict[str, dict[str, Any]]) -> None:
 
 
 def evaluate_seed_in_worker(task):
-    seed, max_seconds, capture_replay = task
-    return evaluate_seed(_EVAL_MODEL, _EVAL_TORCH, _EVAL_DEVICE, seed, max_seconds, capture_replay)
+    seed, max_seconds, capture_replay, start_mode, recovery_severity = task
+    return evaluate_seed(
+        _EVAL_MODEL,
+        _EVAL_TORCH,
+        _EVAL_DEVICE,
+        seed,
+        max_seconds,
+        capture_replay,
+        start_mode,
+        recovery_severity,
+    )
 
 
 def resolved_eval_workers(eval_workers: int, seed_count: int) -> int:
@@ -317,17 +353,28 @@ def evaluate(
     max_seconds: float,
     capture_replay: bool = False,
     eval_workers: int = 1,
+    start_mode: str = "clean",
+    recovery_severity: str = "medium",
 ):
     workers = resolved_eval_workers(eval_workers, len(seeds))
     if workers <= 1:
         results = [
-            evaluate_seed(model, torch, device, seed, max_seconds, capture_replay and index == 0)
+            evaluate_seed(
+                model,
+                torch,
+                device,
+                seed,
+                max_seconds,
+                capture_replay and index == 0,
+                start_mode,
+                recovery_severity,
+            )
             for index, seed in enumerate(seeds)
         ]
     else:
         model_state = serialize_model_state(model, torch)
         tasks = [
-            (seed, max_seconds, capture_replay and index == 0)
+            (seed, max_seconds, capture_replay and index == 0, start_mode, recovery_severity)
             for index, seed in enumerate(seeds)
         ]
         with ProcessPoolExecutor(
@@ -342,6 +389,7 @@ def evaluate(
     scores = [episode["score"] for episode in episodes]
     lines = [episode["linesCleared"] for episode in episodes]
     return {
+        "startMode": start_mode,
         "successRate": success_rate,
         "meanSurvivalSeconds": mean(episode["survivalSeconds"] for episode in episodes),
         "medianSurvivalSeconds": median(episode["survivalSeconds"] for episode in episodes),
@@ -360,6 +408,7 @@ def print_training_legend(args) -> None:
     workers = "auto" if args.eval_workers == 0 else str(args.eval_workers)
     print("Training output guide:")
     print(f"  reward_profile = {args.reward_profile};")
+    print(f"  recovery_start_rate = {args.recovery_start_rate:.2f};")
     print(f"  eval_success = fraction of held-out seeds that survive {args.milestone_seconds:.0f}s;")
     print("  median = median survival time;")
     print("  mean_score/median_score/max_score = held-out evaluation scores;")
@@ -370,6 +419,11 @@ def print_training_legend(args) -> None:
 
 
 def run(args) -> None:
+    if not 0.0 <= args.recovery_start_rate <= 1.0:
+        raise ValueError("--recovery-start-rate must be between 0.0 and 1.0")
+    if args.best_model_objective == "recovery" and args.recovery_eval_seeds <= 0:
+        raise ValueError("--best-model-objective recovery requires --recovery-eval-seeds > 0")
+
     torch, _ = require_torch()
     random.seed(args.seed)
     device = best_device(torch)
@@ -418,6 +472,11 @@ def run(args) -> None:
             global_step = int(checkpoint["globalStep"])
             start_episode = int(checkpoint["episodeIndex"]) + 1
             random.setstate(checkpoint["randomState"])
+            if checkpoint.get("args", {}).get("best_model_objective") != args.best_model_objective:
+                best_median = -1.0
+                best_top_out = 1.0
+                best_score = -1.0
+                print(f"Reset best model tracking for {args.best_model_objective} objective.")
             print(
                 f"Resumed checkpoint from episode {start_episode} "
                 f"at step {global_step}."
@@ -437,7 +496,11 @@ def run(args) -> None:
     target_episode = start_episode + args.episodes
     for episode_index in range(start_episode, target_episode):
         final_episode_index = episode_index
-        game = create_game(f"train-{args.seed}-{episode_index}")
+        start_mode = choose_training_start_mode(args)
+        game_seed = f"train-{args.seed}-{episode_index}"
+        if start_mode == "recovery":
+            game_seed = f"recovery-{game_seed}"
+        game = create_start_game(game_seed, start_mode, args.recovery_severity)
         episode_reward = 0.0
         pieces = 0
         epsilon = args.eps_end + (args.eps_start - args.eps_end) * math.exp(-global_step / args.eps_decay)
@@ -486,6 +549,8 @@ def run(args) -> None:
             "loss": mean(recent_losses) if recent_losses else None,
             "device": str(device),
             "rewardProfile": args.reward_profile,
+            "startMode": start_mode,
+            "recoverySeverity": args.recovery_severity if start_mode == "recovery" else None,
             **throughput,
         }
         with metrics_path.open("a", encoding="utf-8") as handle:
@@ -510,6 +575,19 @@ def run(args) -> None:
                 capture_replay=True,
                 eval_workers=args.eval_workers,
             )
+            recovery_eval_result = None
+            if args.recovery_eval_seeds > 0:
+                recovery_eval_result = evaluate(
+                    model,
+                    torch,
+                    device,
+                    [f"recovery-heldout-{index}" for index in range(args.recovery_eval_seeds)],
+                    args.recovery_eval_seconds,
+                    capture_replay=False,
+                    eval_workers=args.eval_workers,
+                    start_mode="recovery",
+                    recovery_severity=args.recovery_severity,
+                )
             eval_metrics = {
                 "type": "eval",
                 "episode": episode_index,
@@ -519,6 +597,19 @@ def run(args) -> None:
             }
             with metrics_path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(eval_metrics) + "\n")
+                if recovery_eval_result:
+                    recovery_eval_metrics = {
+                        "type": "recoveryEval",
+                        "episode": episode_index,
+                        "step": global_step,
+                        **throughput,
+                        **{
+                            key: value
+                            for key, value in recovery_eval_result.items()
+                            if key not in ("episodes", "replay")
+                        },
+                    }
+                    handle.write(json.dumps(recovery_eval_metrics) + "\n")
             if writer:
                 writer.add_scalar("eval/successRate", eval_result["successRate"], episode_index)
                 writer.add_scalar("eval/medianSurvivalSeconds", eval_result["medianSurvivalSeconds"], episode_index)
@@ -529,10 +620,25 @@ def run(args) -> None:
                 writer.add_scalar("eval/meanLinesCleared", eval_result["meanLinesCleared"], episode_index)
                 writer.add_scalar("eval/stepsPerSecond", throughput["stepsPerSecond"], episode_index)
                 writer.add_scalar("eval/stepsPerHour", throughput["stepsPerHour"], episode_index)
+                if recovery_eval_result:
+                    writer.add_scalar("recovery_eval/successRate", recovery_eval_result["successRate"], episode_index)
+                    writer.add_scalar(
+                        "recovery_eval/medianSurvivalSeconds",
+                        recovery_eval_result["medianSurvivalSeconds"],
+                        episode_index,
+                    )
+                    writer.add_scalar("recovery_eval/topOutRate", recovery_eval_result["topOutRate"], episode_index)
 
             if args.best_model_objective == "score":
                 meets_floor = eval_result["successRate"] >= args.score_survival_floor
                 improved = meets_floor and eval_result["meanScore"] > best_score
+            elif args.best_model_objective == "recovery":
+                meets_floor = eval_result["successRate"] >= args.recovery_clean_floor
+                improved = bool(
+                    recovery_eval_result
+                    and meets_floor
+                    and recovery_eval_result["topOutRate"] < best_top_out
+                )
             else:
                 improved = (
                     eval_result["medianSurvivalSeconds"] >= best_median + 10.0
@@ -542,6 +648,10 @@ def run(args) -> None:
                 best_median = eval_result["medianSurvivalSeconds"]
                 best_top_out = eval_result["topOutRate"]
                 best_score = eval_result["meanScore"]
+                if args.best_model_objective == "recovery" and recovery_eval_result:
+                    best_median = recovery_eval_result["medianSurvivalSeconds"]
+                    best_top_out = recovery_eval_result["topOutRate"]
+                    best_score = recovery_eval_result["meanScore"]
                 export_model(model, torch, best_model_path)
                 if eval_result["replay"]:
                     best_replay_path.write_text(json.dumps(eval_result["replay"]), encoding="utf-8")
@@ -573,6 +683,12 @@ def run(args) -> None:
                 f"median_score={eval_result['medianScore']:.1f} "
                 f"max_score={eval_result['maxScore']}"
             )
+            if recovery_eval_result:
+                print(
+                    f"recovery_eval_success={recovery_eval_result['successRate']:.3f} "
+                    f"recovery_median={recovery_eval_result['medianSurvivalSeconds']:.1f}s "
+                    f"recovery_mean_score={recovery_eval_result['meanScore']:.1f}"
+                )
 
     export_model(model, torch, output_dir / "latest-model.json")
     save_checkpoint(
@@ -617,8 +733,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reward-profile", choices=REWARD_PROFILES, default="survival")
     parser.add_argument("--reset-replay-on-resume", action="store_true")
     parser.add_argument("--reset-optimizer-on-resume", action="store_true")
-    parser.add_argument("--best-model-objective", choices=("survival", "score"), default="survival")
+    parser.add_argument("--best-model-objective", choices=("survival", "score", "recovery"), default="survival")
     parser.add_argument("--score-survival-floor", type=float, default=0.70)
+    parser.add_argument("--recovery-start-rate", type=float, default=0.0)
+    parser.add_argument("--recovery-severity", choices=RECOVERY_SEVERITIES, default="medium")
+    parser.add_argument("--recovery-eval-seeds", type=int, default=0)
+    parser.add_argument("--recovery-eval-seconds", type=float, default=300.0)
+    parser.add_argument("--recovery-clean-floor", type=float, default=0.75)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--output-dir", default="runs/tetris-agent")
     parser.add_argument(

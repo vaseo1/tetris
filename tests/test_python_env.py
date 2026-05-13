@@ -11,7 +11,8 @@ from tetris_ai.afterstates import apply_actions, enumerate_placements, reward_fr
 from tetris_ai.engine import ACTIONS, COLS, ROWS, Piece, clone_game, create_game, get_state, hard_drop, soft_drop, step_game
 from tetris_ai.features import FEATURE_SIZE, board_metrics, feature_vector
 from tetris_ai.model import best_device, make_value_net, require_torch
-from tetris_ai.train import evaluate, performance_metrics, resolved_eval_workers
+from tetris_ai.recovery import create_recovery_game, make_recovery_board, recovery_summary
+from tetris_ai.train import create_start_game, evaluate, performance_metrics, resolved_eval_workers
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -152,6 +153,40 @@ class AfterstateTest(unittest.TestCase):
         self.assertGreater(phase2_reward, survival_reward)
 
 
+class RecoveryStartTest(unittest.TestCase):
+    def test_recovery_board_is_deterministic_and_damaged(self):
+        first = make_recovery_board("recovery-seed", "medium")
+        second = make_recovery_board("recovery-seed", "medium")
+        metrics = board_metrics(first)
+
+        self.assertEqual(first, second)
+        self.assertGreater(metrics["maxHeight"], 0)
+        self.assertGreater(metrics["holes"], 0)
+        self.assertFalse(any(all(row) for row in first))
+
+    def test_recovery_game_is_playable(self):
+        game = create_recovery_game("playable-recovery", "hard")
+        placements = enumerate_placements(game)
+
+        self.assertFalse(game.game_over)
+        self.assertGreater(len(placements), 0)
+        self.assertEqual(game.status, "PLAY")
+
+    def test_mixed_recovery_severity_is_reproducible(self):
+        first = recovery_summary("mixed-seed", "mixed")
+        second = recovery_summary("mixed-seed", "mixed")
+
+        self.assertEqual(first, second)
+        self.assertIn(first["severity"], ("easy", "medium", "hard"))
+
+    def test_start_game_can_create_recovery_mode(self):
+        clean = create_start_game("start-mode", "clean")
+        recovery = create_start_game("start-mode", "recovery", "medium")
+
+        self.assertEqual(board_metrics(clean.board)["filledCells"], 0)
+        self.assertGreater(board_metrics(recovery.board)["filledCells"], 0)
+
+
 class TrainingSmokeTest(unittest.TestCase):
     def test_eval_worker_resolution(self):
         self.assertEqual(resolved_eval_workers(1, 200), 1)
@@ -199,6 +234,47 @@ class TrainingSmokeTest(unittest.TestCase):
         self.assertIn("maxScore", result)
         self.assertIn("meanLinesCleared", result)
         self.assertIn("maxLinesCleared", result)
+
+    def test_recovery_evaluation_reports_start_mode(self):
+        class DummyTorch:
+            class no_grad:
+                def __enter__(self):
+                    return None
+
+                def __exit__(self, *args):
+                    return None
+
+            @staticmethod
+            def tensor(values, **_kwargs):
+                return values
+
+            @staticmethod
+            def argmax(_values):
+                class Index:
+                    @staticmethod
+                    def item():
+                        return 0
+
+                return Index()
+
+            float32 = "float32"
+
+        class DummyModel:
+            def __call__(self, batch):
+                return [0 for _ in batch]
+
+        result = evaluate(
+            DummyModel(),
+            DummyTorch,
+            "cpu",
+            ["recovery-score-stats"],
+            1.4,
+            start_mode="recovery",
+            recovery_severity="medium",
+        )
+
+        self.assertEqual(result["startMode"], "recovery")
+        self.assertIn("topOutRate", result)
 
     def test_parallel_evaluation_runs_when_torch_is_available(self):
         try:
