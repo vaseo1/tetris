@@ -6,16 +6,7 @@ from pathlib import Path
 
 from .model import best_device, make_value_net, require_torch
 from .recovery import RECOVERY_SEVERITIES
-from .train import HELD_OUT_SEEDS, evaluate
-
-
-def load_json_model(model, torch, path: Path):
-    payload = json.loads(path.read_text(encoding="utf-8"))
-    state = {}
-    for index, prefix in enumerate(("layers.0", "layers.2", "layers.4")):
-        state[f"{prefix}.weight"] = torch.tensor(payload["layers"][index]["weight"])
-        state[f"{prefix}.bias"] = torch.tensor(payload["layers"][index]["bias"])
-    model.load_state_dict(state)
+from .train import HELD_OUT_SEEDS, evaluate, load_exported_model
 
 
 def main() -> None:
@@ -31,7 +22,7 @@ def main() -> None:
     torch, _ = require_torch()
     device = best_device(torch)
     model = make_value_net().to(device)
-    load_json_model(model, torch, args.model)
+    load_exported_model(model, torch, args.model)
     model.to(device)
     model.eval()
     result = evaluate(

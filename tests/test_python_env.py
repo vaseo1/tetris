@@ -12,7 +12,15 @@ from tetris_ai.engine import ACTIONS, COLS, ROWS, Piece, clone_game, create_game
 from tetris_ai.features import FEATURE_SIZE, board_metrics, feature_vector
 from tetris_ai.model import best_device, make_value_net, require_torch
 from tetris_ai.recovery import create_recovery_game, make_recovery_board, recovery_summary
-from tetris_ai.train import create_start_game, evaluate, model_export_metadata, performance_metrics, resolved_eval_workers
+from tetris_ai.train import (
+    create_start_game,
+    evaluate,
+    export_model,
+    load_exported_model,
+    model_export_metadata,
+    performance_metrics,
+    resolved_eval_workers,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -207,6 +215,25 @@ class TrainingSmokeTest(unittest.TestCase):
         self.assertEqual(metadata["episodes"], 5)
         self.assertEqual(metadata["exportedAt"], "2026-05-13T17:59:00Z")
 
+    def test_exported_json_can_initialize_model_when_torch_is_available(self):
+        try:
+            torch, _ = require_torch()
+        except SystemExit:
+            self.skipTest("PyTorch is not installed")
+
+        device = best_device(torch)
+        source = make_value_net().to(device)
+        target = make_value_net().to(device)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            model_path = Path(tmp) / "best-model.json"
+            export_model(source, torch, model_path, model_export_metadata(episode_index=2))
+            metadata = load_exported_model(target, torch, model_path)
+
+        self.assertEqual(metadata["episodes"], 3)
+        for key, value in source.state_dict().items():
+            self.assertTrue(torch.equal(value.cpu(), target.state_dict()[key].cpu()))
+
     def test_evaluation_reports_score_stats(self):
         class DummyTorch:
             class no_grad:
@@ -355,6 +382,7 @@ class TrainingSmokeTest(unittest.TestCase):
             self.assertTrue((Path(tmp) / "latest-model.json").exists())
             self.assertTrue((Path(tmp) / "best-replay.json").exists())
             self.assertTrue((Path(tmp) / "checkpoints" / "checkpoint.pt.gz").exists())
+            self.assertTrue((Path(tmp) / "checkpoints" / "checkpoint-best.pt.gz").exists())
             self.assertIn("stepsPerSecond", train_metrics)
             self.assertIn("stepsPerHour", train_metrics)
             self.assertIn("stepsPerEpisode", train_metrics)
@@ -410,6 +438,161 @@ class TrainingSmokeTest(unittest.TestCase):
             metrics = (Path(tmp) / "metrics.jsonl").read_text(encoding="utf-8")
             self.assertIn('"episode": 0', metrics)
             self.assertIn('"episode": 1', metrics)
+
+    def test_training_resume_best_continues_from_best_checkpoint_when_torch_is_available(self):
+        probe = subprocess.run(
+            [sys.executable, "-c", "import torch"],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+        )
+        if probe.returncode != 0:
+            self.skipTest("PyTorch is not installed")
+
+        base_command = [
+            sys.executable,
+            "-m",
+            "tetris_ai.train",
+            "--episodes",
+            "1",
+            "--max-pieces",
+            "4",
+            "--batch-size",
+            "2",
+            "--eval-interval",
+            "1",
+            "--eval-seeds",
+            "2",
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            checkpoint_dir = Path(tmp) / "checkpoints"
+            subprocess.run(
+                [*base_command, "--output-dir", tmp, "--checkpoint-dir", str(checkpoint_dir)],
+                check=True,
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+            )
+            resumed = subprocess.run(
+                [*base_command, "--output-dir", tmp, "--checkpoint-dir", str(checkpoint_dir), "--resume-best"],
+                check=True,
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+            )
+
+            self.assertIn("Resumed best checkpoint from episode 1", resumed.stdout)
+
+    def test_training_init_model_starts_fresh_phase_when_torch_is_available(self):
+        probe = subprocess.run(
+            [sys.executable, "-c", "import torch"],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+        )
+        if probe.returncode != 0:
+            self.skipTest("PyTorch is not installed")
+
+        base_command = [
+            sys.executable,
+            "-m",
+            "tetris_ai.train",
+            "--episodes",
+            "1",
+            "--max-pieces",
+            "4",
+            "--batch-size",
+            "2",
+            "--eval-interval",
+            "1",
+            "--eval-seeds",
+            "2",
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            first_output = Path(tmp) / "first"
+            second_output = Path(tmp) / "second"
+            subprocess.run(
+                [*base_command, "--output-dir", str(first_output), "--checkpoint-dir", str(first_output / "checkpoints")],
+                check=True,
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+            )
+            initialized = subprocess.run(
+                [
+                    *base_command,
+                    "--output-dir",
+                    str(second_output),
+                    "--checkpoint-dir",
+                    str(second_output / "checkpoints"),
+                    "--init-model",
+                    str(first_output / "best-model.json"),
+                ],
+                check=True,
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+            )
+
+            self.assertIn(f"Initialized model from {first_output / 'best-model.json'}", initialized.stdout)
+            metrics = (second_output / "metrics.jsonl").read_text(encoding="utf-8")
+            self.assertIn('"episode": 0', metrics)
+
+    def test_training_rejects_ambiguous_resume_modes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "tetris_ai.train",
+                    "--episodes",
+                    "0",
+                    "--output-dir",
+                    tmp,
+                    "--resume",
+                    "--init-model",
+                    str(Path(tmp) / "best-model.json"),
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not allowed with argument", result.stderr)
+
+    def test_training_resume_best_missing_checkpoint_has_clear_message_when_torch_is_available(self):
+        probe = subprocess.run(
+            [sys.executable, "-c", "import torch"],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+        )
+        if probe.returncode != 0:
+            self.skipTest("PyTorch is not installed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "tetris_ai.train",
+                    "--episodes",
+                    "0",
+                    "--output-dir",
+                    tmp,
+                    "--checkpoint-dir",
+                    str(Path(tmp) / "checkpoints"),
+                    "--resume-best",
+                ],
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("No best checkpoint found", result.stderr)
+        self.assertIn("--init-model runs/tetris-agent/best-model.json", result.stderr)
 
 
 if __name__ == "__main__":

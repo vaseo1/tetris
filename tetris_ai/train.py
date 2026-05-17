@@ -24,6 +24,7 @@ from .recovery import RECOVERY_SEVERITIES, create_recovery_game
 GRAVITY_SECONDS = 0.7
 DEFAULT_CHECKPOINT_DIR = Path("checkpoints/tetris-agent")
 CHECKPOINT_FILENAME = "checkpoint.pt.gz"
+BEST_CHECKPOINT_FILENAME = "checkpoint-best.pt.gz"
 HELD_OUT_SEEDS = [f"heldout-{index}" for index in range(200)]
 _EVAL_MODEL = None
 _EVAL_TORCH = None
@@ -193,6 +194,16 @@ def export_model(model, torch, path: Path, metadata: dict[str, Any] | None = Non
     model.to(best_device(torch))
 
 
+def load_exported_model(model, torch, path: Path) -> dict[str, Any]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    state = {}
+    for index, prefix in enumerate(("layers.0", "layers.2", "layers.4")):
+        state[f"{prefix}.weight"] = torch.tensor(payload["layers"][index]["weight"])
+        state[f"{prefix}.bias"] = torch.tensor(payload["layers"][index]["bias"])
+    model.load_state_dict(state)
+    return payload.get("metadata", {})
+
+
 def checkpoint_payload(
     model,
     target_model,
@@ -245,6 +256,10 @@ def load_checkpoint(torch, checkpoint_path: Path) -> dict[str, Any] | None:
 
 def resolve_checkpoint_path(args) -> Path:
     return Path(args.checkpoint_dir) / CHECKPOINT_FILENAME
+
+
+def resolve_best_checkpoint_path(args) -> Path:
+    return Path(args.checkpoint_dir) / BEST_CHECKPOINT_FILENAME
 
 
 def create_start_game(seed: Any, start_mode: str = "clean", recovery_severity: str = "medium") -> Game:
@@ -441,6 +456,9 @@ def print_training_legend(args) -> None:
     print("  mean_score/median_score/max_score = held-out evaluation scores;")
     print(f"  eval_workers = {workers} parallel worker process(es) for held-out evaluation;")
     print("Resume hint:")
+    print("  --resume continues the latest checkpoint exactly;")
+    print("  --resume-best continues checkpoint-best.pt.gz exactly;")
+    print("  --init-model runs/tetris-agent/best-model.json starts a fresh phase from exported best weights;")
     print(f"  uv run npm run train:ai -- --resume --episodes {args.episodes};")
     print("  uv run python -m tetris_ai.train --resume --episodes N;")
 
@@ -467,6 +485,7 @@ def run(args) -> None:
     best_model_path = output_dir / "best-model.json"
     best_replay_path = output_dir / "best-replay.json"
     checkpoint_path = resolve_checkpoint_path(args)
+    best_checkpoint_path = resolve_best_checkpoint_path(args)
     best_median = -1.0
     best_top_out = 1.0
     best_score = -1.0
@@ -474,10 +493,22 @@ def run(args) -> None:
     global_step = 0
     start_episode = 0
 
-    if args.resume:
-        checkpoint = load_checkpoint(torch, checkpoint_path)
+    if args.init_model:
+        load_exported_model(model, torch, Path(args.init_model))
+        model.to(device)
+        target_model.load_state_dict(model.state_dict())
+        print(f"Initialized model from {args.init_model}.")
+
+    if args.resume or args.resume_best:
+        resume_path = best_checkpoint_path if args.resume_best else checkpoint_path
+        checkpoint = load_checkpoint(torch, resume_path)
         if checkpoint is None:
-            print(f"No checkpoint found at {checkpoint_path}; starting a fresh run.")
+            if args.resume_best:
+                raise SystemExit(
+                    f"No best checkpoint found at {resume_path}; use "
+                    "--init-model runs/tetris-agent/best-model.json to start from exported best weights."
+                )
+            print(f"No checkpoint found at {resume_path}; starting a fresh run.")
         else:
             model.load_state_dict(checkpoint["model"])
             target_model.load_state_dict(checkpoint["targetModel"])
@@ -505,7 +536,7 @@ def run(args) -> None:
                 best_score = -1.0
                 print(f"Reset best model tracking for {args.best_model_objective} objective.")
             print(
-                f"Resumed checkpoint from episode {start_episode} "
+                f"Resumed {'best ' if args.resume_best else ''}checkpoint from episode {start_episode} "
                 f"at step {global_step}."
             )
 
@@ -687,6 +718,23 @@ def run(args) -> None:
                 export_model(model, torch, best_model_path, model_export_metadata(episode_index))
                 if eval_result["replay"]:
                     best_replay_path.write_text(json.dumps(eval_result["replay"]), encoding="utf-8")
+                save_checkpoint(
+                    torch,
+                    best_checkpoint_path,
+                    checkpoint_payload(
+                        model,
+                        target_model,
+                        optimizer,
+                        replay,
+                        episode_index,
+                        global_step,
+                        best_median,
+                        best_top_out,
+                        best_score,
+                        recent_losses,
+                        args,
+                    ),
+                )
 
             save_checkpoint(
                 torch,
@@ -781,10 +829,21 @@ def build_parser() -> argparse.ArgumentParser:
         default=str(DEFAULT_CHECKPOINT_DIR),
         help=f"Directory for compressed checkpoint data. Writes {CHECKPOINT_FILENAME} here.",
     )
-    parser.add_argument(
+    resume_group = parser.add_mutually_exclusive_group()
+    resume_group.add_argument(
         "--resume",
         action="store_true",
         help=f"Continue from checkpoint-dir/{CHECKPOINT_FILENAME} when present.",
+    )
+    resume_group.add_argument(
+        "--resume-best",
+        action="store_true",
+        help=f"Continue from checkpoint-dir/{BEST_CHECKPOINT_FILENAME}; fails if it is missing.",
+    )
+    resume_group.add_argument(
+        "--init-model",
+        type=Path,
+        help="Start a fresh training phase from an exported model JSON.",
     )
     return parser
 
