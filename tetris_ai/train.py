@@ -311,13 +311,26 @@ def evaluate_seed(
     return result, replay
 
 
-def performance_metrics(completed_steps: int, completed_episodes: int, elapsed_seconds: float) -> dict[str, float]:
+def performance_metrics(
+    completed_steps: int,
+    completed_episodes: int,
+    elapsed_seconds: float,
+    total_episodes: int | None = None,
+) -> dict[str, float | None]:
     safe_elapsed_seconds = max(elapsed_seconds, 1e-9)
+    steps_per_hour = (completed_steps * 3600.0) / safe_elapsed_seconds
+    steps_per_episode = completed_steps / completed_episodes if completed_episodes > 0 else None
+    estimated_hours_left = None
+    if total_episodes is not None and steps_per_episode is not None and steps_per_hour > 0:
+        remaining_episodes = max(total_episodes - completed_episodes, 0)
+        estimated_hours_left = (remaining_episodes * steps_per_episode) / steps_per_hour
     return {
         "elapsedSeconds": elapsed_seconds,
         "stepsPerSecond": completed_steps / safe_elapsed_seconds,
-        "stepsPerHour": (completed_steps * 3600.0) / safe_elapsed_seconds,
+        "stepsPerHour": steps_per_hour,
+        "stepsPerEpisode": steps_per_episode,
         "episodesPerHour": (completed_episodes * 3600.0) / safe_elapsed_seconds,
+        "estimatedHoursLeft": estimated_hours_left,
     }
 
 
@@ -549,6 +562,7 @@ def run(args) -> None:
             global_step - start_step,
             episode_index - start_episode + 1,
             elapsed_seconds,
+            args.episodes,
         )
         metrics = {
             "type": "trainEpisode",
@@ -575,7 +589,11 @@ def run(args) -> None:
             writer.add_scalar("train/epsilon", epsilon, episode_index)
             writer.add_scalar("train/stepsPerSecond", throughput["stepsPerSecond"], episode_index)
             writer.add_scalar("train/stepsPerHour", throughput["stepsPerHour"], episode_index)
+            if throughput["stepsPerEpisode"] is not None:
+                writer.add_scalar("train/stepsPerEpisode", throughput["stepsPerEpisode"], episode_index)
             writer.add_scalar("train/episodesPerHour", throughput["episodesPerHour"], episode_index)
+            if throughput["estimatedHoursLeft"] is not None:
+                writer.add_scalar("train/estimatedHoursLeft", throughput["estimatedHoursLeft"], episode_index)
             if recent_losses:
                 writer.add_scalar("train/loss", mean(recent_losses), episode_index)
 
@@ -691,6 +709,8 @@ def run(args) -> None:
             print(
                 f"episode={episode_index + 1} step={global_step} "
                 f"steps_per_hour={throughput['stepsPerHour']:.0f} "
+                f"steps_per_episode={throughput['stepsPerEpisode'] or 0:.1f} "
+                f"hours_left={throughput['estimatedHoursLeft'] or 0:.2f} "
                 f"eval_success={eval_result['successRate']:.3f} "
                 f"median={eval_result['medianSurvivalSeconds']:.1f}s "
                 f"mean_score={eval_result['meanScore']:.1f} "

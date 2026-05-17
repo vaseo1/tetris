@@ -194,10 +194,12 @@ class TrainingSmokeTest(unittest.TestCase):
         self.assertGreaterEqual(resolved_eval_workers(0, 200), 1)
 
     def test_performance_metrics_use_completed_steps(self):
-        metrics = performance_metrics(100, 5, 3600.0)
+        metrics = performance_metrics(100, 5, 3600.0, total_episodes=10)
 
         self.assertEqual(metrics["stepsPerHour"], 100.0)
+        self.assertEqual(metrics["stepsPerEpisode"], 20.0)
         self.assertEqual(metrics["episodesPerHour"], 5.0)
+        self.assertEqual(metrics["estimatedHoursLeft"], 1.0)
 
     def test_model_export_metadata_uses_completed_episode_count(self):
         metadata = model_export_metadata(episode_index=4, exported_at="2026-05-13T17:59:00Z")
@@ -355,7 +357,9 @@ class TrainingSmokeTest(unittest.TestCase):
             self.assertTrue((Path(tmp) / "checkpoints" / "checkpoint.pt.gz").exists())
             self.assertIn("stepsPerSecond", train_metrics)
             self.assertIn("stepsPerHour", train_metrics)
+            self.assertIn("stepsPerEpisode", train_metrics)
             self.assertIn("episodesPerHour", train_metrics)
+            self.assertIn("estimatedHoursLeft", train_metrics)
             latest_model = json.loads((Path(tmp) / "latest-model.json").read_text(encoding="utf-8"))
             self.assertEqual(latest_model["metadata"]["episodes"], 2)
             self.assertRegex(latest_model["metadata"]["exportedAt"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
