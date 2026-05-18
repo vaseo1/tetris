@@ -25,6 +25,7 @@ GRAVITY_SECONDS = 0.7
 DEFAULT_CHECKPOINT_DIR = Path("checkpoints/tetris-agent")
 CHECKPOINT_FILENAME = "checkpoint.pt.gz"
 BEST_CHECKPOINT_FILENAME = "checkpoint-best.pt.gz"
+INIT_MODEL_CHECKPOINT_FILENAME = "checkpoint-init-model.pt.gz"
 INIT_MODEL_EPS_DECAY_MULTIPLIER = 10
 HELD_OUT_SEEDS = [f"heldout-{index}" for index in range(200)]
 _EVAL_MODEL = None
@@ -263,6 +264,10 @@ def resolve_best_checkpoint_path(args) -> Path:
     return Path(args.checkpoint_dir) / BEST_CHECKPOINT_FILENAME
 
 
+def resolve_init_model_checkpoint_path(args) -> Path:
+    return Path(args.checkpoint_dir) / INIT_MODEL_CHECKPOINT_FILENAME
+
+
 def default_init_model_step(args) -> int:
     if args.eps_start <= args.eps_end:
         return 0
@@ -479,7 +484,7 @@ def print_training_legend(args) -> None:
     print("Resume hint:")
     print("  --resume continues the latest checkpoint exactly;")
     print("  --resume-best continues checkpoint-best.pt.gz exactly;")
-    print("  --init-model runs/tetris-agent/best-model.json starts a fresh phase from exported best weights;")
+    print("  --init-model starts a protected phase and writes checkpoint-init-model.pt.gz;")
     print(f"  uv run npm run train:ai -- --resume --episodes {args.episodes};")
     print("  uv run python -m tetris_ai.train --resume --episodes N;")
 
@@ -507,7 +512,7 @@ def run(args) -> None:
     metrics_path = output_dir / "metrics.jsonl"
     best_model_path = output_dir / "best-model.json"
     best_replay_path = output_dir / "best-replay.json"
-    checkpoint_path = resolve_checkpoint_path(args)
+    checkpoint_path = resolve_init_model_checkpoint_path(args) if args.init_model else resolve_checkpoint_path(args)
     best_checkpoint_path = resolve_best_checkpoint_path(args)
     best_median = -1.0
     best_top_out = 1.0
@@ -899,7 +904,7 @@ def build_parser() -> argparse.ArgumentParser:
     resume_group.add_argument(
         "--init-model",
         type=Path,
-        help="Start a fresh training phase from an exported model JSON.",
+        help=f"Start a protected training phase from an exported model JSON. Writes {INIT_MODEL_CHECKPOINT_FILENAME}.",
     )
     parser.add_argument(
         "--init-model-step",

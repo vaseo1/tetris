@@ -572,6 +572,54 @@ class TrainingSmokeTest(unittest.TestCase):
             train_metric = next(metric for metric in metrics if metric["type"] == "trainEpisode")
             self.assertEqual(train_metric["episode"], 0)
             self.assertLess(train_metric["epsilon"], 0.051)
+            self.assertFalse((second_output / "checkpoints" / "checkpoint.pt.gz").exists())
+            self.assertTrue((second_output / "checkpoints" / "checkpoint-init-model.pt.gz").exists())
+
+    def test_evaluate_cli_accepts_eval_workers_when_torch_is_available(self):
+        probe = subprocess.run(
+            [sys.executable, "-c", "import torch"],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+        )
+        if probe.returncode != 0:
+            self.skipTest("PyTorch is not installed")
+
+        try:
+            torch, _ = require_torch()
+        except SystemExit:
+            self.skipTest("PyTorch is not installed")
+
+        device = best_device(torch)
+        model = make_value_net().to(device)
+        with tempfile.TemporaryDirectory() as tmp:
+            model_path = Path(tmp) / "model.json"
+            export_model(model, torch, model_path, model_export_metadata(episode_index=0))
+            failures_path = Path(tmp) / "failures.json"
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "tetris_ai.evaluate",
+                    str(model_path),
+                    "--seeds",
+                    "2",
+                    "--seconds",
+                    "0.2",
+                    "--eval-workers",
+                    "1",
+                    "--failures-output",
+                    str(failures_path),
+                ],
+                check=True,
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+            )
+            failures = json.loads(failures_path.read_text(encoding="utf-8"))
+
+        self.assertIn('"successRate"', result.stdout)
+        self.assertIsInstance(failures, list)
 
     def test_training_rejects_ambiguous_resume_modes(self):
         with tempfile.TemporaryDirectory() as tmp:

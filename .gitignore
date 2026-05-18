@@ -11,3 +11,4 @@ __pycache__/
 *.py[cod]
 *.pt
 checkpoints/tetris-agent/checkpoint-best.pt.gz
+checkpoints/tetris-agent/checkpoint-init-model.pt.gz
