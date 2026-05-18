@@ -269,6 +269,20 @@ def default_init_model_step(args) -> int:
     return max(0, math.ceil(args.eps_decay * INIT_MODEL_EPS_DECAY_MULTIPLIER))
 
 
+def best_tracking_values(args, eval_result: dict[str, Any], recovery_eval_result: dict[str, Any] | None = None):
+    if args.best_model_objective == "recovery" and recovery_eval_result:
+        return (
+            recovery_eval_result["medianSurvivalSeconds"],
+            recovery_eval_result["topOutRate"],
+            recovery_eval_result["meanScore"],
+        )
+    return (
+        eval_result["medianSurvivalSeconds"],
+        eval_result["topOutRate"],
+        eval_result["meanScore"],
+    )
+
+
 def create_start_game(seed: Any, start_mode: str = "clean", recovery_severity: str = "medium") -> Game:
     if start_mode == "clean":
         return create_game(seed)
@@ -512,6 +526,40 @@ def run(args) -> None:
             f"Initialized exploration schedule at step {global_step}; "
             "use --init-model-step to override."
         )
+        baseline_eval_result = evaluate(
+            model,
+            torch,
+            device,
+            HELD_OUT_SEEDS[: args.eval_seeds],
+            args.milestone_seconds,
+            capture_replay=False,
+            eval_workers=args.eval_workers,
+        )
+        baseline_recovery_eval_result = None
+        if args.recovery_eval_seeds > 0:
+            baseline_recovery_eval_result = evaluate(
+                model,
+                torch,
+                device,
+                [f"recovery-heldout-{index}" for index in range(args.recovery_eval_seeds)],
+                args.recovery_eval_seconds,
+                capture_replay=False,
+                eval_workers=args.eval_workers,
+                start_mode="recovery",
+                recovery_severity=args.recovery_severity,
+            )
+        best_median, best_top_out, best_score = best_tracking_values(
+            args,
+            baseline_eval_result,
+            baseline_recovery_eval_result,
+        )
+        print(
+            "Initialized best tracking from source model: "
+            f"eval_success={baseline_eval_result['successRate']:.3f} "
+            f"median={baseline_eval_result['medianSurvivalSeconds']:.1f}s "
+            f"top_out={baseline_eval_result['topOutRate']:.3f} "
+            f"mean_score={baseline_eval_result['meanScore']:.1f}."
+        )
 
     if args.resume or args.resume_best:
         resume_path = best_checkpoint_path if args.resume_best else checkpoint_path
@@ -722,13 +770,7 @@ def run(args) -> None:
                     or eval_result["topOutRate"] < best_top_out
                 )
             if improved:
-                best_median = eval_result["medianSurvivalSeconds"]
-                best_top_out = eval_result["topOutRate"]
-                best_score = eval_result["meanScore"]
-                if args.best_model_objective == "recovery" and recovery_eval_result:
-                    best_median = recovery_eval_result["medianSurvivalSeconds"]
-                    best_top_out = recovery_eval_result["topOutRate"]
-                    best_score = recovery_eval_result["meanScore"]
+                best_median, best_top_out, best_score = best_tracking_values(args, eval_result, recovery_eval_result)
                 export_model(model, torch, best_model_path, model_export_metadata(episode_index))
                 if eval_result["replay"]:
                     best_replay_path.write_text(json.dumps(eval_result["replay"]), encoding="utf-8")

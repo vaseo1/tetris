@@ -13,6 +13,7 @@ from tetris_ai.features import FEATURE_SIZE, board_metrics, feature_vector
 from tetris_ai.model import best_device, make_value_net, require_torch
 from tetris_ai.recovery import create_recovery_game, make_recovery_board, recovery_summary
 from tetris_ai.train import (
+    best_tracking_values,
     create_start_game,
     default_init_model_step,
     evaluate,
@@ -223,6 +224,23 @@ class TrainingSmokeTest(unittest.TestCase):
             eps_decay = 12000
 
         self.assertEqual(default_init_model_step(Args), 120000)
+
+    def test_best_tracking_values_use_recovery_objective_when_requested(self):
+        class Args:
+            best_model_objective = "recovery"
+
+        clean_eval = {
+            "medianSurvivalSeconds": 14400.0,
+            "topOutRate": 0.4,
+            "meanScore": 6000.0,
+        }
+        recovery_eval = {
+            "medianSurvivalSeconds": 300.0,
+            "topOutRate": 0.2,
+            "meanScore": 120.0,
+        }
+
+        self.assertEqual(best_tracking_values(Args, clean_eval, recovery_eval), (300.0, 0.2, 120.0))
 
     def test_exported_json_can_initialize_model_when_torch_is_available(self):
         try:
@@ -545,6 +563,7 @@ class TrainingSmokeTest(unittest.TestCase):
 
             self.assertIn(f"Initialized model from {first_output / 'best-model.json'}", initialized.stdout)
             self.assertIn("Initialized exploration schedule at step 120000", initialized.stdout)
+            self.assertIn("Initialized best tracking from source model", initialized.stdout)
             metrics = [
                 json.loads(line)
                 for line in (second_output / "metrics.jsonl").read_text(encoding="utf-8").splitlines()

@@ -20,6 +20,7 @@ uv run python -m tetris_ai.train --resume --episodes 3000 --reward-profile phase
 - Use `--resume-best` to continue from `checkpoint-best.pt.gz` with optimizer, replay, RNG, and best tracking preserved.
 - Use `--init-model runs/tetris-agent/best-model.json` to start a fresh training phase from exported best weights when changing the milestone, reward profile, or recovery schedule.
 - `--init-model` starts at a mature epsilon decay step by default so fine-tuning does not restart with fully random exploration. Use `--init-model-step 0` only when deliberate fresh exploration is wanted.
+- `--init-model` evaluates the source model before training and uses that result as the best baseline, so a new phase only overwrites `best-model.json` after beating the parent.
 - New best evaluations write both `best-model.json` and `checkpoint-best.pt.gz`.
 
 Next long-survival stability probe:
