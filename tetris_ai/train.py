@@ -137,7 +137,7 @@ def next_vectors(game: Game, reward_profile: str = "survival") -> list[list[floa
     return [placement.vector for placement in playable_candidate_placements(game, reward_profile)]
 
 
-def optimize(model, target_model, optimizer, replay: PrioritizedReplay, torch, device, args) -> float | None:
+def optimize(model, target_model, optimizer, replay: PrioritizedReplay, torch, device, args, source_model=None) -> float | None:
     if len(replay) < args.batch_size:
         return None
 
@@ -161,6 +161,11 @@ def optimize(model, target_model, optimizer, replay: PrioritizedReplay, torch, d
     target_values = rewards + args.gamma * (1.0 - done) * torch.tensor(targets, dtype=torch.float32, device=device)
     td_errors = target_values - q_values
     loss = (torch.nn.functional.smooth_l1_loss(q_values, target_values, reduction="none") * weights_tensor).mean()
+    if source_model is not None and args.source_anchor_weight > 0.0:
+        with torch.no_grad():
+            source_values = source_model(states)
+        anchor_loss = torch.nn.functional.mse_loss(q_values, source_values)
+        loss = loss + args.source_anchor_weight * anchor_loss
 
     optimizer.zero_grad(set_to_none=True)
     loss.backward()
@@ -487,6 +492,12 @@ def print_training_legend(args) -> None:
     print("Training output guide:")
     print(f"  reward_profile = {args.reward_profile};")
     print(f"  recovery_start_rate = {args.recovery_start_rate:.2f};")
+    if args.warmup_replay_steps:
+        print(f"  warmup_replay_steps = {args.warmup_replay_steps}; optimizer updates are frozen during warmup;")
+    if args.eval_regression_tolerance is not None:
+        print(f"  eval_regression_tolerance = {args.eval_regression_tolerance:.3f};")
+    if args.source_anchor_weight:
+        print(f"  source_anchor_weight = {args.source_anchor_weight:.3f};")
     print(f"  eval_success = fraction of held-out seeds that survive {args.milestone_seconds:.0f}s;")
     print("  median = median survival time;")
     print("  mean_score/median_score/max_score = held-out evaluation scores;")
@@ -504,6 +515,12 @@ def run(args) -> None:
         raise ValueError("--recovery-start-rate must be between 0.0 and 1.0")
     if args.init_model_step is not None and args.init_model_step < 0:
         raise ValueError("--init-model-step must be >= 0")
+    if args.warmup_replay_steps < 0:
+        raise ValueError("--warmup-replay-steps must be >= 0")
+    if args.eval_regression_tolerance is not None and args.eval_regression_tolerance < 0.0:
+        raise ValueError("--eval-regression-tolerance must be >= 0")
+    if args.source_anchor_weight < 0.0:
+        raise ValueError("--source-anchor-weight must be >= 0")
     if args.best_model_objective == "recovery" and args.recovery_eval_seeds <= 0:
         raise ValueError("--best-model-objective recovery requires --recovery-eval-seeds > 0")
 
@@ -530,11 +547,17 @@ def run(args) -> None:
     recent_losses = deque(maxlen=100)
     global_step = 0
     start_episode = 0
+    baseline_eval_result = None
+    source_model = None
 
     if args.init_model:
         load_exported_model(model, torch, Path(args.init_model))
         model.to(device)
         target_model.load_state_dict(model.state_dict())
+        if args.source_anchor_weight > 0.0:
+            source_model = make_value_net().to(device)
+            source_model.load_state_dict(model.state_dict())
+            source_model.eval()
         global_step = args.init_model_step if args.init_model_step is not None else default_init_model_step(args)
         print(f"Initialized model from {args.init_model}.")
         print(
@@ -629,6 +652,7 @@ def run(args) -> None:
     start_step = global_step
     final_episode_index = start_episode - 1
     target_episode = start_episode + args.episodes
+    stopped_for_regression = False
     for episode_index in range(start_episode, target_episode):
         final_episode_index = episode_index
         start_mode = choose_training_start_mode(args)
@@ -658,11 +682,22 @@ def run(args) -> None:
             pieces += 1
             global_step += 1
 
-            loss = optimize(model, target_model, optimizer, replay, torch, device, args)
+            phase_steps = global_step - start_step
+            in_warmup = phase_steps <= args.warmup_replay_steps
+            loss = None if in_warmup else optimize(
+                model,
+                target_model,
+                optimizer,
+                replay,
+                torch,
+                device,
+                args,
+                source_model,
+            )
             if loss is not None:
                 recent_losses.append(loss)
 
-            if global_step % args.target_update == 0:
+            if not in_warmup and global_step % args.target_update == 0:
                 target_model.load_state_dict(model.state_dict())
 
         elapsed_seconds = time.perf_counter() - start
@@ -683,6 +718,7 @@ def run(args) -> None:
             "linesCleared": game.lines_cleared,
             "gameOver": game.game_over,
             "loss": mean(recent_losses) if recent_losses else None,
+            "warmupReplayStepsRemaining": max(0, args.warmup_replay_steps - (global_step - start_step)),
             "device": str(device),
             "rewardProfile": args.reward_profile,
             "startMode": start_mode,
@@ -769,6 +805,30 @@ def run(args) -> None:
                     )
                     writer.add_scalar("recovery_eval/topOutRate", recovery_eval_result["topOutRate"], episode_index)
 
+            if baseline_eval_result and args.eval_regression_tolerance is not None:
+                regression_floor = baseline_eval_result["successRate"] - args.eval_regression_tolerance
+                if eval_result["successRate"] < regression_floor:
+                    stopped_for_regression = True
+                    regression_stop_message = (
+                        f"Stopped for eval regression: eval_success={eval_result['successRate']:.3f} "
+                        f"fell below source baseline floor {regression_floor:.3f} "
+                        f"(baseline={baseline_eval_result['successRate']:.3f}, "
+                        f"tolerance={args.eval_regression_tolerance:.3f})."
+                    )
+                    print(
+                        f"episode={episode_index + 1} step={global_step} "
+                        f"steps_per_hour={throughput['stepsPerHour']:.0f} "
+                        f"steps_per_episode={throughput['stepsPerEpisode'] or 0:.1f} "
+                        f"hours_left={throughput['estimatedHoursLeft'] or 0:.2f} "
+                        f"eval_success={eval_result['successRate']:.3f} "
+                        f"median={eval_result['medianSurvivalSeconds']:.1f}s "
+                        f"mean_score={eval_result['meanScore']:.1f} "
+                        f"median_score={eval_result['medianScore']:.1f} "
+                        f"max_score={eval_result['maxScore']}"
+                    )
+                    print(regression_stop_message)
+                    break
+
             if args.best_model_objective == "score":
                 meets_floor = eval_result["successRate"] >= args.score_survival_floor
                 improved = meets_floor and eval_result["meanScore"] > best_score
@@ -842,25 +902,27 @@ def run(args) -> None:
                     f"recovery_median={recovery_eval_result['medianSurvivalSeconds']:.1f}s "
                     f"recovery_mean_score={recovery_eval_result['meanScore']:.1f}"
                 )
-
-    export_model(model, torch, output_dir / "latest-model.json", model_export_metadata(final_episode_index))
-    save_checkpoint(
-        torch,
-        checkpoint_path,
-        checkpoint_payload(
-            model,
-            target_model,
-            optimizer,
-            replay,
-            final_episode_index,
-            global_step,
-            best_median,
-            best_top_out,
-            best_score,
-            recent_losses,
-            args,
-        ),
-    )
+    if stopped_for_regression:
+        print("Skipped checkpoint and latest-model export because regression stop fired.")
+    else:
+        export_model(model, torch, output_dir / "latest-model.json", model_export_metadata(final_episode_index))
+        save_checkpoint(
+            torch,
+            checkpoint_path,
+            checkpoint_payload(
+                model,
+                target_model,
+                optimizer,
+                replay,
+                final_episode_index,
+                global_step,
+                best_median,
+                best_top_out,
+                best_score,
+                recent_losses,
+                args,
+            ),
+        )
     if writer:
         writer.close()
 
@@ -879,6 +941,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--priority-beta", type=float, default=0.4)
     parser.add_argument("--max-grad-norm", type=float, default=10.0)
     parser.add_argument("--target-update", type=int, default=1000)
+    parser.add_argument(
+        "--warmup-replay-steps",
+        type=int,
+        default=0,
+        help="Collect replay for this many phase-local steps before optimizer or target-network updates.",
+    )
     parser.add_argument("--eval-interval", type=int, default=25)
     parser.add_argument("--eval-seeds", type=int, default=200)
     parser.add_argument("--eval-workers", type=int, default=0, help="Evaluation worker processes. Use 0 for auto.")
@@ -893,6 +961,21 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--recovery-eval-seeds", type=int, default=0)
     parser.add_argument("--recovery-eval-seconds", type=float, default=300.0)
     parser.add_argument("--recovery-clean-floor", type=float, default=0.75)
+    parser.add_argument(
+        "--eval-regression-tolerance",
+        type=float,
+        default=None,
+        help=(
+            "For --init-model runs, stop after an eval if success falls more than this "
+            "below the source model baseline."
+        ),
+    )
+    parser.add_argument(
+        "--source-anchor-weight",
+        type=float,
+        default=0.0,
+        help="For --init-model runs, add MSE regularization toward the source model's Q-values.",
+    )
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--output-dir", default="runs/tetris-agent")
     parser.add_argument(

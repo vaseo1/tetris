@@ -659,6 +659,12 @@ class TrainingSmokeTest(unittest.TestCase):
                     str(second_output / "checkpoints"),
                     "--init-model",
                     str(first_output / "best-model.json"),
+                    "--warmup-replay-steps",
+                    "10",
+                    "--eval-regression-tolerance",
+                    "0.5",
+                    "--source-anchor-weight",
+                    "0.25",
                 ],
                 check=True,
                 cwd=ROOT,
@@ -669,6 +675,9 @@ class TrainingSmokeTest(unittest.TestCase):
             self.assertIn(f"Initialized model from {first_output / 'best-model.json'}", initialized.stdout)
             self.assertIn("Initialized exploration schedule at step 120000", initialized.stdout)
             self.assertIn("Initialized best tracking from source model", initialized.stdout)
+            self.assertIn("warmup_replay_steps = 10", initialized.stdout)
+            self.assertIn("eval_regression_tolerance = 0.500", initialized.stdout)
+            self.assertIn("source_anchor_weight = 0.250", initialized.stdout)
             metrics = [
                 json.loads(line)
                 for line in (second_output / "metrics.jsonl").read_text(encoding="utf-8").splitlines()
@@ -677,6 +686,7 @@ class TrainingSmokeTest(unittest.TestCase):
             train_metric = next(metric for metric in metrics if metric["type"] == "trainEpisode")
             self.assertEqual(train_metric["episode"], 0)
             self.assertLess(train_metric["epsilon"], 0.051)
+            self.assertEqual(train_metric["warmupReplayStepsRemaining"], 6)
             self.assertFalse((second_output / "checkpoints" / "checkpoint.pt.gz").exists())
             self.assertTrue((second_output / "checkpoints" / "checkpoint-init-model.pt.gz").exists())
 
