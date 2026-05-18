@@ -25,6 +25,7 @@ GRAVITY_SECONDS = 0.7
 DEFAULT_CHECKPOINT_DIR = Path("checkpoints/tetris-agent")
 CHECKPOINT_FILENAME = "checkpoint.pt.gz"
 BEST_CHECKPOINT_FILENAME = "checkpoint-best.pt.gz"
+INIT_MODEL_EPS_DECAY_MULTIPLIER = 10
 HELD_OUT_SEEDS = [f"heldout-{index}" for index in range(200)]
 _EVAL_MODEL = None
 _EVAL_TORCH = None
@@ -262,6 +263,12 @@ def resolve_best_checkpoint_path(args) -> Path:
     return Path(args.checkpoint_dir) / BEST_CHECKPOINT_FILENAME
 
 
+def default_init_model_step(args) -> int:
+    if args.eps_start <= args.eps_end:
+        return 0
+    return max(0, math.ceil(args.eps_decay * INIT_MODEL_EPS_DECAY_MULTIPLIER))
+
+
 def create_start_game(seed: Any, start_mode: str = "clean", recovery_severity: str = "medium") -> Game:
     if start_mode == "clean":
         return create_game(seed)
@@ -466,6 +473,8 @@ def print_training_legend(args) -> None:
 def run(args) -> None:
     if not 0.0 <= args.recovery_start_rate <= 1.0:
         raise ValueError("--recovery-start-rate must be between 0.0 and 1.0")
+    if args.init_model_step is not None and args.init_model_step < 0:
+        raise ValueError("--init-model-step must be >= 0")
     if args.best_model_objective == "recovery" and args.recovery_eval_seeds <= 0:
         raise ValueError("--best-model-objective recovery requires --recovery-eval-seeds > 0")
 
@@ -497,7 +506,12 @@ def run(args) -> None:
         load_exported_model(model, torch, Path(args.init_model))
         model.to(device)
         target_model.load_state_dict(model.state_dict())
+        global_step = args.init_model_step if args.init_model_step is not None else default_init_model_step(args)
         print(f"Initialized model from {args.init_model}.")
+        print(
+            f"Initialized exploration schedule at step {global_step}; "
+            "use --init-model-step to override."
+        )
 
     if args.resume or args.resume_best:
         resume_path = best_checkpoint_path if args.resume_best else checkpoint_path
@@ -844,6 +858,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--init-model",
         type=Path,
         help="Start a fresh training phase from an exported model JSON.",
+    )
+    parser.add_argument(
+        "--init-model-step",
+        type=int,
+        default=None,
+        help=(
+            "Global step to use for --init-model epsilon decay. Defaults to a mature "
+            "near-eps-end step; use 0 only for deliberate fresh exploration."
+        ),
     )
     return parser
 

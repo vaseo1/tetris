@@ -10,3 +10,4 @@ runs/tetris-agent/*
 __pycache__/
 *.py[cod]
 *.pt
+checkpoints/tetris-agent/checkpoint-best.pt.gz

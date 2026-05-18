@@ -14,6 +14,7 @@ from tetris_ai.model import best_device, make_value_net, require_torch
 from tetris_ai.recovery import create_recovery_game, make_recovery_board, recovery_summary
 from tetris_ai.train import (
     create_start_game,
+    default_init_model_step,
     evaluate,
     export_model,
     load_exported_model,
@@ -214,6 +215,14 @@ class TrainingSmokeTest(unittest.TestCase):
 
         self.assertEqual(metadata["episodes"], 5)
         self.assertEqual(metadata["exportedAt"], "2026-05-13T17:59:00Z")
+
+    def test_init_model_uses_mature_exploration_step_by_default(self):
+        class Args:
+            eps_start = 1.0
+            eps_end = 0.05
+            eps_decay = 12000
+
+        self.assertEqual(default_init_model_step(Args), 120000)
 
     def test_exported_json_can_initialize_model_when_torch_is_available(self):
         try:
@@ -535,8 +544,15 @@ class TrainingSmokeTest(unittest.TestCase):
             )
 
             self.assertIn(f"Initialized model from {first_output / 'best-model.json'}", initialized.stdout)
-            metrics = (second_output / "metrics.jsonl").read_text(encoding="utf-8")
-            self.assertIn('"episode": 0', metrics)
+            self.assertIn("Initialized exploration schedule at step 120000", initialized.stdout)
+            metrics = [
+                json.loads(line)
+                for line in (second_output / "metrics.jsonl").read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            train_metric = next(metric for metric in metrics if metric["type"] == "trainEpisode")
+            self.assertEqual(train_metric["episode"], 0)
+            self.assertLess(train_metric["epsilon"], 0.051)
 
     def test_training_rejects_ambiguous_resume_modes(self):
         with tempfile.TemporaryDirectory() as tmp:
