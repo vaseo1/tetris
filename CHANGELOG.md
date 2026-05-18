@@ -23,6 +23,8 @@ uv run python -m tetris_ai.train --resume --episodes 3000 --reward-profile phase
 - `--init-model` evaluates the source model before training and uses that result as the best baseline, so a new phase only overwrites `best-model.json` after beating the parent.
 - `--init-model` writes protected experiment checkpoints to `checkpoint-init-model.pt.gz` instead of replacing the main `checkpoint.pt.gz`.
 - `tetris_ai.evaluate` supports `--eval-workers`, `--episodes-output`, and `--failures-output` for long validation runs.
+- Action selection now refuses terminal placements when any non-terminal placement exists, which protects long survival runs from value misrankings in near-top-out states.
+- `--reward-profile survival-v2` adds stronger penalties for covered holes, deep wells, top-zone occupancy, and high-stack pressure without changing the exported model shape.
 - New best evaluations write both `best-model.json` and `checkpoint-best.pt.gz`.
 
 Next long-survival stability probe:
@@ -35,7 +37,7 @@ Next long-survival stability probe:
   --max-pieces 23000 \
   --eval-seeds 50 \
   --eval-interval 10 \
-  --reward-profile phase2-score \
+  --reward-profile survival-v2 \
   --best-model-objective survival \
   --recovery-start-rate 0.00 \
   --learning-rate 0.0000005

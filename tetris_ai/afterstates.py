@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from .engine import ACTIONS, Game, clone_game, collides, hard_drop, move, rotate, step_game
 from .features import board_metrics, feature_vector
 
-REWARD_PROFILES = ("survival", "phase2-score")
+REWARD_PROFILES = ("survival", "survival-v2", "phase2-score")
 
 
 @dataclass(frozen=True)
@@ -22,6 +22,22 @@ class Placement:
 
 
 def reward_from_metrics(metrics: dict[str, int], cleared: int, done: bool, reward_profile: str = "survival") -> float:
+    if reward_profile == "survival-v2":
+        line_reward = [0.0, 1.0, 2.5, 4.0, 6.5][min(4, cleared)]
+        top_pressure = max(0, metrics["maxHeight"] - 14)
+        return (
+            0.10
+            + line_reward
+            - 0.055 * metrics["holes"]
+            - 0.004 * metrics.get("coveredHoles", 0)
+            - 0.024 * metrics["maxHeight"]
+            - 0.012 * metrics["bumpiness"]
+            - 0.025 * metrics["wells"]
+            - 0.080 * metrics.get("topZoneCells", 0)
+            - 0.035 * metrics.get("dangerZoneCells", 0)
+            - 0.080 * top_pressure * top_pressure
+            - (20.0 if done else 0.0)
+        )
     if reward_profile == "phase2-score":
         line_reward = [0.0, 1.5, 4.0, 7.0, 12.0][min(4, cleared)]
         return (

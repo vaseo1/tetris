@@ -4,6 +4,8 @@ from .engine import COLS, ROWS
 
 PIECES = ("I", "J", "L", "O", "S", "T", "Z")
 FEATURE_SIZE = ROWS * COLS + len(PIECES) + 8
+TOP_ZONE_ROWS = 4
+DANGER_ZONE_ROWS = 6
 
 
 def column_heights(board: list[list[int]]) -> list[int]:
@@ -28,6 +30,20 @@ def count_holes(board: list[list[int]]) -> int:
             elif seen_block:
                 holes += 1
     return holes
+
+
+def covered_holes(board: list[list[int]]) -> int:
+    covered = 0
+    for x in range(COLS):
+        blocks_above = 0
+        seen_block = False
+        for y in range(ROWS):
+            if board[y][x]:
+                seen_block = True
+                blocks_above += 1
+            elif seen_block:
+                covered += blocks_above
+    return covered
 
 
 def bumpiness(heights: list[int]) -> int:
@@ -58,12 +74,15 @@ def board_metrics(board: list[list[int]]) -> dict[str, int]:
     heights = column_heights(board)
     return {
         "holes": count_holes(board),
+        "coveredHoles": covered_holes(board),
         "maxHeight": max(heights),
         "aggregateHeight": aggregate_height(heights),
         "bumpiness": bumpiness(heights),
         "completeLines": complete_lines(board),
         "wells": well_depth(board),
         "filledCells": sum(sum(row) for row in board),
+        "topZoneCells": sum(sum(row) for row in board[:TOP_ZONE_ROWS]),
+        "dangerZoneCells": sum(sum(row) for row in board[:DANGER_ZONE_ROWS]),
     }
 
 

@@ -8,12 +8,13 @@ import unittest
 from pathlib import Path
 
 from tetris_ai.afterstates import apply_actions, enumerate_placements, reward_from_metrics
-from tetris_ai.engine import ACTIONS, COLS, ROWS, Piece, clone_game, create_game, get_state, hard_drop, soft_drop, step_game
+from tetris_ai.engine import ACTIONS, COLS, ROWS, Game, Piece, clone_game, create_game, get_state, hard_drop, soft_drop, step_game
 from tetris_ai.features import FEATURE_SIZE, board_metrics, feature_vector
 from tetris_ai.model import best_device, make_value_net, require_torch
 from tetris_ai.recovery import create_recovery_game, make_recovery_board, recovery_summary
 from tetris_ai.train import (
     best_tracking_values,
+    choose_placement,
     create_start_game,
     default_init_model_step,
     evaluate,
@@ -149,18 +150,122 @@ class AfterstateTest(unittest.TestCase):
     def test_phase2_reward_increases_line_clear_incentive(self):
         metrics = {
             "holes": 0,
+            "coveredHoles": 0,
             "maxHeight": 4,
             "aggregateHeight": 12,
             "bumpiness": 2,
             "completeLines": 0,
             "wells": 0,
             "filledCells": 20,
+            "topZoneCells": 0,
+            "dangerZoneCells": 0,
         }
 
         survival_reward = reward_from_metrics(metrics, 4, False, "survival")
         phase2_reward = reward_from_metrics(metrics, 4, False, "phase2-score")
 
         self.assertGreater(phase2_reward, survival_reward)
+
+    def test_survival_v2_penalizes_top_danger_and_terminal_states(self):
+        stable_metrics = {
+            "holes": 2,
+            "coveredHoles": 4,
+            "maxHeight": 8,
+            "aggregateHeight": 40,
+            "bumpiness": 4,
+            "completeLines": 0,
+            "wells": 0,
+            "filledCells": 40,
+            "topZoneCells": 0,
+            "dangerZoneCells": 0,
+        }
+        dangerous_metrics = {
+            **stable_metrics,
+            "holes": 8,
+            "coveredHoles": 60,
+            "maxHeight": 17,
+            "wells": 8,
+            "topZoneCells": 3,
+            "dangerZoneCells": 8,
+        }
+
+        stable_reward = reward_from_metrics(stable_metrics, 0, False, "survival-v2")
+        dangerous_reward = reward_from_metrics(dangerous_metrics, 0, False, "survival-v2")
+        terminal_reward = reward_from_metrics(dangerous_metrics, 0, True, "survival-v2")
+
+        self.assertLess(dangerous_reward, stable_reward)
+        self.assertLess(terminal_reward, dangerous_reward - 10.0)
+
+    def test_choose_placement_filters_terminal_moves_when_safe_move_exists(self):
+        try:
+            torch, _ = require_torch()
+        except SystemExit:
+            self.skipTest("PyTorch is not installed")
+
+        board = [
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0, 0, 0, 1, 1, 1],
+            [0, 0, 0, 0, 0, 0, 1, 1, 1, 1],
+            [0, 0, 0, 0, 0, 0, 1, 0, 1, 1],
+            [0, 0, 1, 1, 1, 0, 1, 1, 1, 1],
+            [0, 1, 1, 1, 1, 0, 1, 1, 1, 1],
+            [0, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+            [1, 1, 1, 1, 1, 1, 1, 1, 0, 1],
+            [1, 0, 1, 1, 1, 1, 1, 1, 1, 1],
+            [1, 1, 1, 0, 1, 1, 1, 1, 1, 1],
+            [1, 1, 1, 1, 1, 1, 1, 0, 1, 1],
+            [1, 1, 1, 0, 1, 1, 0, 1, 1, 1],
+            [1, 1, 1, 1, 1, 1, 1, 1, 0, 1],
+            [1, 0, 1, 1, 1, 1, 1, 1, 1, 1],
+            [1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+            [0, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+            [1, 1, 1, 1, 1, 1, 0, 1, 1, 1],
+            [1, 1, 1, 1, 1, 0, 1, 1, 1, 1],
+        ]
+        game = Game(
+            COLS,
+            ROWS,
+            board,
+            Piece("Z", [[0, 0], [1, 0], [1, 1], [2, 1]], 3, 0),
+            Piece("J", [[0, 0], [0, 1], [1, 1], [2, 1]], 3, 0),
+            110,
+            110,
+            False,
+            False,
+            "PLAY",
+            83,
+            0,
+            0,
+        )
+        placements = enumerate_placements(game, "survival-v2")
+        terminal_placement = next(placement for placement in placements if placement.done)
+        self.assertTrue(any(not placement.done for placement in placements))
+
+        class TerminalPreferenceModel:
+            def __init__(self, vector):
+                self.vector = torch.tensor(vector, dtype=torch.float32)
+
+            def __call__(self, batch):
+                matches = torch.isclose(batch, self.vector.to(batch.device)).all(dim=1)
+                return torch.where(
+                    matches,
+                    torch.full_like(matches, 100.0, dtype=torch.float32),
+                    torch.zeros_like(matches, dtype=torch.float32),
+                )
+
+        placement = choose_placement(
+            TerminalPreferenceModel(terminal_placement.vector),
+            torch,
+            torch.device("cpu"),
+            game,
+            epsilon=0.0,
+            reward_profile="survival-v2",
+        )
+
+        self.assertIsNotNone(placement)
+        self.assertFalse(placement.done)
 
 
 class RecoveryStartTest(unittest.TestCase):

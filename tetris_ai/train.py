@@ -94,8 +94,18 @@ class PrioritizedReplay:
         self.next_index = int(state["next_index"])
 
 
-def choose_placement(model, torch, device, game: Game, epsilon: float, reward_profile: str = "survival") -> Placement | None:
+def playable_candidate_placements(game: Game, reward_profile: str = "survival") -> list[Placement]:
     placements = enumerate_placements(game, reward_profile)
+    if not placements:
+        return []
+    playable_placements = [placement for placement in placements if not placement.done]
+    if playable_placements:
+        return playable_placements
+    return placements
+
+
+def choose_placement(model, torch, device, game: Game, epsilon: float, reward_profile: str = "survival") -> Placement | None:
+    placements = playable_candidate_placements(game, reward_profile)
     if not placements:
         return None
     if random.random() < epsilon:
@@ -124,7 +134,7 @@ def deserialize_model_state(torch, model_state: dict[str, dict[str, Any]]) -> di
 
 
 def next_vectors(game: Game, reward_profile: str = "survival") -> list[list[float]]:
-    return [placement.vector for placement in enumerate_placements(game, reward_profile)]
+    return [placement.vector for placement in playable_candidate_placements(game, reward_profile)]
 
 
 def optimize(model, target_model, optimizer, replay: PrioritizedReplay, torch, device, args) -> float | None:
