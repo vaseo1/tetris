@@ -26,6 +26,7 @@ uv run python -m tetris_ai.train --resume --episodes 3000 --reward-profile phase
 - Action selection now refuses terminal placements when any non-terminal placement exists, which protects long survival runs from value misrankings in near-top-out states.
 - `--reward-profile survival-v2` adds stronger penalties for covered holes, deep wells, top-zone occupancy, and high-stack pressure without changing the exported model shape.
 - `--warmup-replay-steps` collects replay before optimizer updates, useful when changing reward profiles from exported best weights.
+- `--optimizer-update-interval` throttles optimizer updates after warmup, so long episodes cannot apply thousands of updates before the next eval.
 - `--eval-regression-tolerance` stops an `--init-model` phase if held-out success falls too far below the source model baseline.
 - `--source-anchor-weight` regularizes init-model fine-tuning toward the source model's Q-values to reduce catastrophic drift.
 - New best evaluations write both `best-model.json` and `checkpoint-best.pt.gz`.
@@ -35,16 +36,19 @@ Next guarded long-survival stability probe:
 ```bash
 .venv/bin/python -m tetris_ai.train \
   --init-model runs/tetris-agent/best-model.json \
-  --episodes 120 \
+  --episodes 12 \
   --milestone-seconds 14400 \
   --max-pieces 23000 \
   --eval-seeds 50 \
-  --eval-interval 10 \
+  --eval-interval 1 \
   --reward-profile survival-v2 \
-  --warmup-replay-steps 10000 \
+  --eps-start 0 \
+  --eps-end 0 \
+  --warmup-replay-steps 30000 \
+  --optimizer-update-interval 5000 \
   --eval-regression-tolerance 0.04 \
-  --source-anchor-weight 0.25 \
+  --source-anchor-weight 0.50 \
   --best-model-objective survival \
   --recovery-start-rate 0.00 \
-  --learning-rate 0.00000005
+  --learning-rate 0.00000001
 ```

@@ -228,6 +228,7 @@ def checkpoint_payload(
     replay: PrioritizedReplay,
     episode_index: int,
     global_step: int,
+    optimizer_updates: int,
     best_median: float,
     best_top_out: float,
     best_score: float,
@@ -238,6 +239,7 @@ def checkpoint_payload(
         "version": 1,
         "episodeIndex": episode_index,
         "globalStep": global_step,
+        "optimizerUpdates": optimizer_updates,
         "model": model.state_dict(),
         "targetModel": target_model.state_dict(),
         "optimizer": optimizer.state_dict(),
@@ -494,6 +496,8 @@ def print_training_legend(args) -> None:
     print(f"  recovery_start_rate = {args.recovery_start_rate:.2f};")
     if args.warmup_replay_steps:
         print(f"  warmup_replay_steps = {args.warmup_replay_steps}; optimizer updates are frozen during warmup;")
+    if args.optimizer_update_interval > 1:
+        print(f"  optimizer_update_interval = {args.optimizer_update_interval};")
     if args.eval_regression_tolerance is not None:
         print(f"  eval_regression_tolerance = {args.eval_regression_tolerance:.3f};")
     if args.source_anchor_weight:
@@ -517,6 +521,8 @@ def run(args) -> None:
         raise ValueError("--init-model-step must be >= 0")
     if args.warmup_replay_steps < 0:
         raise ValueError("--warmup-replay-steps must be >= 0")
+    if args.optimizer_update_interval < 1:
+        raise ValueError("--optimizer-update-interval must be >= 1")
     if args.eval_regression_tolerance is not None and args.eval_regression_tolerance < 0.0:
         raise ValueError("--eval-regression-tolerance must be >= 0")
     if args.source_anchor_weight < 0.0:
@@ -546,6 +552,7 @@ def run(args) -> None:
     best_score = -1.0
     recent_losses = deque(maxlen=100)
     global_step = 0
+    optimizer_updates = 0
     start_episode = 0
     baseline_eval_result = None
     source_model = None
@@ -628,6 +635,7 @@ def run(args) -> None:
             else:
                 recent_losses = deque(checkpoint.get("recentLosses", []), maxlen=100)
             global_step = int(checkpoint["globalStep"])
+            optimizer_updates = int(checkpoint.get("optimizerUpdates", 0))
             start_episode = int(checkpoint["episodeIndex"]) + 1
             random.setstate(checkpoint["randomState"])
             if checkpoint.get("args", {}).get("best_model_objective") != args.best_model_objective:
@@ -684,20 +692,29 @@ def run(args) -> None:
 
             phase_steps = global_step - start_step
             in_warmup = phase_steps <= args.warmup_replay_steps
-            loss = None if in_warmup else optimize(
-                model,
-                target_model,
-                optimizer,
-                replay,
-                torch,
-                device,
-                args,
-                source_model,
+            should_update = (
+                not in_warmup
+                and (phase_steps - args.warmup_replay_steps) % args.optimizer_update_interval == 0
+            )
+            loss = (
+                optimize(
+                    model,
+                    target_model,
+                    optimizer,
+                    replay,
+                    torch,
+                    device,
+                    args,
+                    source_model,
+                )
+                if should_update
+                else None
             )
             if loss is not None:
                 recent_losses.append(loss)
+                optimizer_updates += 1
 
-            if not in_warmup and global_step % args.target_update == 0:
+            if loss is not None and optimizer_updates % args.target_update == 0:
                 target_model.load_state_dict(model.state_dict())
 
         elapsed_seconds = time.perf_counter() - start
@@ -719,6 +736,7 @@ def run(args) -> None:
             "gameOver": game.game_over,
             "loss": mean(recent_losses) if recent_losses else None,
             "warmupReplayStepsRemaining": max(0, args.warmup_replay_steps - (global_step - start_step)),
+            "optimizerUpdates": optimizer_updates,
             "device": str(device),
             "rewardProfile": args.reward_profile,
             "startMode": start_mode,
@@ -859,6 +877,7 @@ def run(args) -> None:
                         replay,
                         episode_index,
                         global_step,
+                        optimizer_updates,
                         best_median,
                         best_top_out,
                         best_score,
@@ -877,6 +896,7 @@ def run(args) -> None:
                     replay,
                     episode_index,
                     global_step,
+                    optimizer_updates,
                     best_median,
                     best_top_out,
                     best_score,
@@ -916,6 +936,7 @@ def run(args) -> None:
                 replay,
                 final_episode_index,
                 global_step,
+                optimizer_updates,
                 best_median,
                 best_top_out,
                 best_score,
@@ -946,6 +967,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=0,
         help="Collect replay for this many phase-local steps before optimizer or target-network updates.",
+    )
+    parser.add_argument(
+        "--optimizer-update-interval",
+        type=int,
+        default=1,
+        help="Run one optimizer update every N phase-local steps after warmup.",
     )
     parser.add_argument("--eval-interval", type=int, default=25)
     parser.add_argument("--eval-seeds", type=int, default=200)
