@@ -22,6 +22,7 @@ from tetris_ai.train import (
     export_model,
     load_exported_model,
     model_export_metadata,
+    placement_safety_adjustment,
     placement_safety_penalty,
     performance_metrics,
     resolved_eval_workers,
@@ -282,6 +283,74 @@ class AfterstateTest(unittest.TestCase):
             placement_safety_penalty(placement, SafetyConfig(profile="safety-v1")),
         )
 
+    def test_safety_v3_rewards_recovery_placements(self):
+        game = self.recovery_bonus_game()
+        current_metrics = board_metrics(game.board)
+        clear_placement = next(
+            placement for placement in enumerate_placements(game, "survival-v2") if placement.cleared > 0
+        )
+
+        self.assertLess(
+            placement_safety_adjustment(current_metrics, clear_placement, SafetyConfig(profile="safety-v3")),
+            placement_safety_adjustment(current_metrics, clear_placement, SafetyConfig(profile="safety-v1")),
+        )
+
+    def test_safety_v3_matches_v1_without_recovery_improvement(self):
+        game = self.recovery_bonus_game()
+        current_metrics = board_metrics(game.board)
+        neutral_placement = next(
+            placement
+            for placement in enumerate_placements(game, "survival-v2")
+            if placement.cleared == 0
+            and board_metrics([list(row) for row in placement.board])["maxHeight"] >= current_metrics["maxHeight"]
+        )
+
+        self.assertEqual(
+            placement_safety_adjustment(current_metrics, neutral_placement, SafetyConfig(profile="safety-v3")),
+            placement_safety_adjustment(current_metrics, neutral_placement, SafetyConfig(profile="safety-v1")),
+        )
+
+    def test_safety_v3_can_override_slight_preference_for_non_recovery_move(self):
+        try:
+            torch, _ = require_torch()
+        except SystemExit:
+            self.skipTest("PyTorch is not installed")
+
+        game = self.recovery_bonus_game()
+        placements = [placement for placement in enumerate_placements(game, "survival-v2") if not placement.done]
+        recovery_placement = next(placement for placement in placements if placement.cleared > 0)
+        risky_placement = next(
+            placement
+            for placement in placements
+            if placement.cleared == 0
+            and board_metrics([list(row) for row in placement.board])["maxHeight"]
+            >= board_metrics(game.board)["maxHeight"]
+        )
+
+        class SlightRiskPreferenceModel:
+            def __init__(self, vector):
+                self.vector = torch.tensor(vector, dtype=torch.float32)
+
+            def __call__(self, batch):
+                matches = torch.isclose(batch, self.vector.to(batch.device)).all(dim=1)
+                return torch.where(
+                    matches,
+                    torch.full_like(matches, 20.0, dtype=torch.float32),
+                    torch.zeros_like(matches, dtype=torch.float32),
+                )
+
+        placement = choose_placement(
+            SlightRiskPreferenceModel(risky_placement.vector),
+            torch,
+            torch.device("cpu"),
+            game,
+            epsilon=0.0,
+            reward_profile="survival-v2",
+            safety_config=SafetyConfig(profile="safety-v3", weight=1.0),
+        )
+
+        self.assertEqual(placement, recovery_placement)
+
     def high_risk_game(self):
         board = [
             [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
@@ -317,6 +386,26 @@ class AfterstateTest(unittest.TestCase):
             False,
             "PLAY",
             83,
+            0,
+            0,
+        )
+
+    def recovery_bonus_game(self):
+        board = [[0 for _ in range(COLS)] for _ in range(ROWS)]
+        for row_index in range(6, ROWS):
+            board[row_index] = [1, 1, 1, 0, 0, 0, 0, 1, 1, 1]
+        return Game(
+            COLS,
+            ROWS,
+            board,
+            Piece("I", [[0, 1], [1, 1], [2, 1], [3, 1]], 3, 0),
+            Piece("O", [[1, 0], [2, 0], [1, 1], [2, 1]], 3, 0),
+            0,
+            0,
+            False,
+            False,
+            "PLAY",
+            1,
             0,
             0,
         )
@@ -793,6 +882,49 @@ class TrainingSmokeTest(unittest.TestCase):
 
         self.assertIn('"successRate"', result.stdout)
         self.assertIsInstance(failures, list)
+
+    def test_evaluate_cli_accepts_safety_v3_profile_when_torch_is_available(self):
+        probe = subprocess.run(
+            [sys.executable, "-c", "import torch"],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+        )
+        if probe.returncode != 0:
+            self.skipTest("PyTorch is not installed")
+
+        try:
+            torch, _ = require_torch()
+        except SystemExit:
+            self.skipTest("PyTorch is not installed")
+
+        device = best_device(torch)
+        model = make_value_net().to(device)
+        with tempfile.TemporaryDirectory() as tmp:
+            model_path = Path(tmp) / "model.json"
+            export_model(model, torch, model_path, model_export_metadata(episode_index=0))
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "tetris_ai.evaluate",
+                    str(model_path),
+                    "--seeds",
+                    "1",
+                    "--seconds",
+                    "0.2",
+                    "--eval-workers",
+                    "1",
+                    "--safety-profile",
+                    "safety-v3",
+                ],
+                check=True,
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+            )
+
+        self.assertIn('"successRate"', result.stdout)
 
     def test_training_rejects_ambiguous_resume_modes(self):
         with tempfile.TemporaryDirectory() as tmp:

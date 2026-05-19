@@ -29,7 +29,9 @@ uv run python -m tetris_ai.train --resume --episodes 3000 --reward-profile phase
 - `--optimizer-update-interval` throttles optimizer updates after warmup, so long episodes cannot apply thousands of updates before the next eval.
 - `--eval-regression-tolerance` stops an `--init-model` phase if held-out success falls too far below the source model baseline.
 - `--source-anchor-weight` regularizes init-model fine-tuning toward the source model's Q-values to reduce catastrophic drift.
-- `--safety-profile safety-v1` enables an inference-time placement reranker for risky states; `safety-v2` adds nonlinear penalties for critical top/height/hole afterstates.
+- `--safety-profile safety-v1` enables an inference-time placement reranker for risky states; `safety-v1` at weight `0.08` is the current confirmed baseline.
+- `safety-v2` adds nonlinear penalties for critical top/height/hole afterstates, but broad held-out sweeps regressed versus `safety-v1`; keep it experimental rather than recommended.
+- `--safety-profile safety-v3` keeps the `safety-v1` afterstate penalty and adds a capped recovery bonus for risky-state placements that clear lines, reduce max height, or reduce danger-zone pressure.
 - `tetris_ai.evaluate --safety-sweep-weights` can test overlay weights without training.
 - New best evaluations write both `best-model.json` and `checkpoint-best.pt.gz`.
 
@@ -40,6 +42,6 @@ Next safety-overlay sweep:
   --seeds 50 \
   --seconds 14400 \
   --eval-workers 0 \
-  --safety-profile safety-v2 \
-  --safety-sweep-weights 0.03,0.05,0.07,0.09
+  --safety-profile safety-v3 \
+  --safety-sweep-weights 0.05,0.07,0.08,0.10,0.12
 ```

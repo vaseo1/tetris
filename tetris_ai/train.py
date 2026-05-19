@@ -31,7 +31,7 @@ HELD_OUT_SEEDS = [f"heldout-{index}" for index in range(200)]
 _EVAL_MODEL = None
 _EVAL_TORCH = None
 _EVAL_DEVICE = "cpu"
-SAFETY_PROFILES = ("none", "safety-v1", "safety-v2")
+SAFETY_PROFILES = ("none", "safety-v1", "safety-v2", "safety-v3")
 
 
 @dataclass
@@ -167,6 +167,30 @@ def placement_safety_penalty(placement: Placement, safety_config: SafetyConfig |
     return penalty
 
 
+def placement_recovery_bonus(current_metrics: dict[str, int], placement: Placement) -> float:
+    after_metrics = board_metrics([list(row) for row in placement.board])
+    bonus = (
+        28.0 * placement.cleared
+        + 10.0 * max(0, current_metrics["maxHeight"] - after_metrics["maxHeight"])
+        + 0.35 * max(0, current_metrics.get("coveredHoles", 0) - after_metrics.get("coveredHoles", 0))
+        + 2.0 * max(0, current_metrics.get("dangerZoneCells", 0) - after_metrics.get("dangerZoneCells", 0))
+    )
+    return min(80.0, bonus)
+
+
+def placement_safety_adjustment(
+    current_metrics: dict[str, int],
+    placement: Placement,
+    safety_config: SafetyConfig,
+) -> float:
+    if safety_config.profile == "safety-v3":
+        return placement_safety_penalty(placement, SafetyConfig(profile="safety-v1")) - placement_recovery_bonus(
+            current_metrics,
+            placement,
+        )
+    return placement_safety_penalty(placement, safety_config)
+
+
 def choose_placement(
     model,
     torch,
@@ -184,13 +208,15 @@ def choose_placement(
     with torch.no_grad():
         batch = torch.tensor([placement.vector for placement in placements], dtype=torch.float32, device=device)
         values = model(batch)
-        if safety_config and safety_overlay_active(board_metrics(game.board), safety_config):
-            penalties = torch.tensor(
-                [placement_safety_penalty(placement, safety_config) for placement in placements],
-                dtype=torch.float32,
-                device=device,
-            )
-            values = values - safety_config.weight * penalties
+        if safety_config:
+            current_metrics = board_metrics(game.board)
+            if safety_overlay_active(current_metrics, safety_config):
+                adjustments = torch.tensor(
+                    [placement_safety_adjustment(current_metrics, placement, safety_config) for placement in placements],
+                    dtype=torch.float32,
+                    device=device,
+                )
+                values = values - safety_config.weight * adjustments
         return placements[int(torch.argmax(values).item())]
 
 
