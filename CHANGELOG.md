@@ -31,17 +31,25 @@ uv run python -m tetris_ai.train --resume --episodes 3000 --reward-profile phase
 - `--source-anchor-weight` regularizes init-model fine-tuning toward the source model's Q-values to reduce catastrophic drift.
 - `--safety-profile safety-v1` enables an inference-time placement reranker for risky states; `safety-v1` at weight `0.08` is the current confirmed baseline.
 - `safety-v2` adds nonlinear penalties for critical top/height/hole afterstates, but broad held-out sweeps regressed versus `safety-v1`; keep it experimental rather than recommended.
-- `--safety-profile safety-v3` keeps the `safety-v1` afterstate penalty and adds a capped recovery bonus for risky-state placements that clear lines, reduce max height, or reduce danger-zone pressure.
+- `--safety-profile safety-v3` keeps the `safety-v1` afterstate penalty and adds a capped recovery bonus for risky-state placements that clear lines, reduce max height, or reduce danger-zone pressure. A 50-seed, 4h sweep did not beat `safety-v1`, so do not promote it without further changes.
 - `tetris_ai.evaluate --safety-sweep-weights` can test overlay weights without training.
 - New best evaluations write both `best-model.json` and `checkpoint-best.pt.gz`.
 
-Next safety-overlay sweep:
+Safety-overlay findings:
+
+- Confirmed baseline: `safety-v1` at weight `0.08` had the best 200-seed, 4h result seen so far (`successRate=0.665`) and should remain the default candidate for long 6h checks.
+- `safety-v1` 50-seed, 4h sweep previously reached `successRate=0.86` at weight `0.07`, `0.84` at weight `0.10`, and `0.82` at weight `0.16`.
+- `safety-v3` 50-seed, 4h sweep underperformed: best was weight `0.05` at `successRate=0.76`; weights `0.07`, `0.08`, `0.10`, and `0.12` scored `0.68`, `0.60`, `0.64`, and `0.58`.
+- Conclusion: the v3 recovery bonus targets the right catastrophic-failure idea, but this formula is too disruptive broadly. Do not run the 200-seed v3 confirmation unless the scoring changes.
+
+Current recommended validation command:
 
 ```bash
 .venv/bin/python -m tetris_ai.evaluate runs/tetris-agent/best-model.json \
-  --seeds 50 \
-  --seconds 14400 \
+  --seeds 100 \
+  --seconds 21600 \
   --eval-workers 0 \
-  --safety-profile safety-v3 \
-  --safety-sweep-weights 0.05,0.07,0.08,0.10,0.12
+  --safety-profile safety-v1 \
+  --safety-weight 0.08 \
+  --failures-output runs/tetris-agent/failures-6h-100-safety-v1-w008.json
 ```
