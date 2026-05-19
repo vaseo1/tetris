@@ -13,6 +13,7 @@ from tetris_ai.features import FEATURE_SIZE, board_metrics, feature_vector
 from tetris_ai.model import best_device, make_value_net, require_torch
 from tetris_ai.recovery import create_recovery_game, make_recovery_board, recovery_summary
 from tetris_ai.train import (
+    SafetyConfig,
     best_tracking_values,
     choose_placement,
     create_start_game,
@@ -21,6 +22,7 @@ from tetris_ai.train import (
     export_model,
     load_exported_model,
     model_export_metadata,
+    placement_safety_penalty,
     performance_metrics,
     resolved_eval_workers,
 )
@@ -202,43 +204,7 @@ class AfterstateTest(unittest.TestCase):
         except SystemExit:
             self.skipTest("PyTorch is not installed")
 
-        board = [
-            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            [0, 0, 0, 0, 0, 0, 0, 1, 1, 1],
-            [0, 0, 0, 0, 0, 0, 1, 1, 1, 1],
-            [0, 0, 0, 0, 0, 0, 1, 0, 1, 1],
-            [0, 0, 1, 1, 1, 0, 1, 1, 1, 1],
-            [0, 1, 1, 1, 1, 0, 1, 1, 1, 1],
-            [0, 1, 1, 1, 1, 1, 1, 1, 1, 1],
-            [1, 1, 1, 1, 1, 1, 1, 1, 0, 1],
-            [1, 0, 1, 1, 1, 1, 1, 1, 1, 1],
-            [1, 1, 1, 0, 1, 1, 1, 1, 1, 1],
-            [1, 1, 1, 1, 1, 1, 1, 0, 1, 1],
-            [1, 1, 1, 0, 1, 1, 0, 1, 1, 1],
-            [1, 1, 1, 1, 1, 1, 1, 1, 0, 1],
-            [1, 0, 1, 1, 1, 1, 1, 1, 1, 1],
-            [1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
-            [0, 1, 1, 1, 1, 1, 1, 1, 1, 1],
-            [1, 1, 1, 1, 1, 1, 0, 1, 1, 1],
-            [1, 1, 1, 1, 1, 0, 1, 1, 1, 1],
-        ]
-        game = Game(
-            COLS,
-            ROWS,
-            board,
-            Piece("Z", [[0, 0], [1, 0], [1, 1], [2, 1]], 3, 0),
-            Piece("J", [[0, 0], [0, 1], [1, 1], [2, 1]], 3, 0),
-            110,
-            110,
-            False,
-            False,
-            "PLAY",
-            83,
-            0,
-            0,
-        )
+        game = self.high_risk_game()
         placements = enumerate_placements(game, "survival-v2")
         terminal_placement = next(placement for placement in placements if placement.done)
         self.assertTrue(any(not placement.done for placement in placements))
@@ -266,6 +232,82 @@ class AfterstateTest(unittest.TestCase):
 
         self.assertIsNotNone(placement)
         self.assertFalse(placement.done)
+
+    def test_safety_profile_can_override_high_risk_model_preference(self):
+        try:
+            torch, _ = require_torch()
+        except SystemExit:
+            self.skipTest("PyTorch is not installed")
+
+        game = self.high_risk_game()
+        placements = [placement for placement in enumerate_placements(game, "survival-v2") if not placement.done]
+        preferred = max(placements, key=placement_safety_penalty)
+        safest = min(placements, key=placement_safety_penalty)
+        self.assertGreater(placement_safety_penalty(preferred), placement_safety_penalty(safest))
+
+        class RiskPreferenceModel:
+            def __init__(self, vector):
+                self.vector = torch.tensor(vector, dtype=torch.float32)
+
+            def __call__(self, batch):
+                matches = torch.isclose(batch, self.vector.to(batch.device)).all(dim=1)
+                return torch.where(
+                    matches,
+                    torch.full_like(matches, 100.0, dtype=torch.float32),
+                    torch.zeros_like(matches, dtype=torch.float32),
+                )
+
+        placement = choose_placement(
+            RiskPreferenceModel(preferred.vector),
+            torch,
+            torch.device("cpu"),
+            game,
+            epsilon=0.0,
+            reward_profile="survival-v2",
+            safety_config=SafetyConfig(profile="safety-v1", weight=100.0),
+        )
+
+        self.assertIsNotNone(placement)
+        self.assertLess(placement_safety_penalty(placement), placement_safety_penalty(preferred))
+
+    def high_risk_game(self):
+        board = [
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 0, 0, 0, 0, 1, 1, 1],
+            [0, 0, 0, 0, 0, 0, 1, 1, 1, 1],
+            [0, 0, 0, 0, 0, 0, 1, 0, 1, 1],
+            [0, 0, 1, 1, 1, 0, 1, 1, 1, 1],
+            [0, 1, 1, 1, 1, 0, 1, 1, 1, 1],
+            [0, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+            [1, 1, 1, 1, 1, 1, 1, 1, 0, 1],
+            [1, 0, 1, 1, 1, 1, 1, 1, 1, 1],
+            [1, 1, 1, 0, 1, 1, 1, 1, 1, 1],
+            [1, 1, 1, 1, 1, 1, 1, 0, 1, 1],
+            [1, 1, 1, 0, 1, 1, 0, 1, 1, 1],
+            [1, 1, 1, 1, 1, 1, 1, 1, 0, 1],
+            [1, 0, 1, 1, 1, 1, 1, 1, 1, 1],
+            [1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
+            [0, 1, 1, 1, 1, 1, 1, 1, 1, 1],
+            [1, 1, 1, 1, 1, 1, 0, 1, 1, 1],
+            [1, 1, 1, 1, 1, 0, 1, 1, 1, 1],
+        ]
+        return Game(
+            COLS,
+            ROWS,
+            board,
+            Piece("Z", [[0, 0], [1, 0], [1, 1], [2, 1]], 3, 0),
+            Piece("J", [[0, 0], [0, 1], [1, 1], [2, 1]], 3, 0),
+            110,
+            110,
+            False,
+            False,
+            "PLAY",
+            83,
+            0,
+            0,
+        )
 
 
 class RecoveryStartTest(unittest.TestCase):

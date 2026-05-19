@@ -29,26 +29,16 @@ uv run python -m tetris_ai.train --resume --episodes 3000 --reward-profile phase
 - `--optimizer-update-interval` throttles optimizer updates after warmup, so long episodes cannot apply thousands of updates before the next eval.
 - `--eval-regression-tolerance` stops an `--init-model` phase if held-out success falls too far below the source model baseline.
 - `--source-anchor-weight` regularizes init-model fine-tuning toward the source model's Q-values to reduce catastrophic drift.
+- `--safety-profile safety-v1` enables an inference-time placement reranker for risky states; `tetris_ai.evaluate --safety-sweep-weights` can test weights without training.
 - New best evaluations write both `best-model.json` and `checkpoint-best.pt.gz`.
 
-Next guarded long-survival stability probe:
+Next safety-overlay sweep:
 
 ```bash
-.venv/bin/python -m tetris_ai.train \
-  --init-model runs/tetris-agent/best-model.json \
-  --episodes 12 \
-  --milestone-seconds 14400 \
-  --max-pieces 23000 \
-  --eval-seeds 50 \
-  --eval-interval 1 \
-  --reward-profile survival-v2 \
-  --eps-start 0 \
-  --eps-end 0 \
-  --warmup-replay-steps 30000 \
-  --optimizer-update-interval 5000 \
-  --eval-regression-tolerance 0.04 \
-  --source-anchor-weight 0.50 \
-  --best-model-objective survival \
-  --recovery-start-rate 0.00 \
-  --learning-rate 0.00000001
+.venv/bin/python -m tetris_ai.evaluate runs/tetris-agent/best-model.json \
+  --seeds 50 \
+  --seconds 14400 \
+  --eval-workers 0 \
+  --safety-profile safety-v1 \
+  --safety-sweep-weights 0.05,0.10,0.20,0.35,0.50
 ```

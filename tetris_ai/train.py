@@ -31,6 +31,7 @@ HELD_OUT_SEEDS = [f"heldout-{index}" for index in range(200)]
 _EVAL_MODEL = None
 _EVAL_TORCH = None
 _EVAL_DEVICE = "cpu"
+SAFETY_PROFILES = ("none", "safety-v1")
 
 
 @dataclass
@@ -39,6 +40,16 @@ class Transition:
     reward: float
     next_states: list[list[float]]
     done: bool
+
+
+@dataclass(frozen=True)
+class SafetyConfig:
+    profile: str = "none"
+    weight: float = 1.0
+    trigger_height: int = 14
+    trigger_holes: int = 8
+    trigger_covered_holes: int = 40
+    trigger_wells: int = 8
 
 
 class PrioritizedReplay:
@@ -104,7 +115,55 @@ def playable_candidate_placements(game: Game, reward_profile: str = "survival") 
     return placements
 
 
-def choose_placement(model, torch, device, game: Game, epsilon: float, reward_profile: str = "survival") -> Placement | None:
+def safety_config_from_args(args) -> SafetyConfig:
+    return SafetyConfig(
+        profile=args.safety_profile,
+        weight=args.safety_weight,
+        trigger_height=args.safety_trigger_height,
+        trigger_holes=args.safety_trigger_holes,
+        trigger_covered_holes=args.safety_trigger_covered_holes,
+        trigger_wells=args.safety_trigger_wells,
+    )
+
+
+def safety_overlay_active(metrics: dict[str, int], safety_config: SafetyConfig) -> bool:
+    if safety_config.profile == "none":
+        return False
+    return (
+        metrics["maxHeight"] >= safety_config.trigger_height
+        or metrics["holes"] >= safety_config.trigger_holes
+        or metrics.get("coveredHoles", 0) >= safety_config.trigger_covered_holes
+        or metrics["wells"] >= safety_config.trigger_wells
+        or metrics.get("topZoneCells", 0) > 0
+        or metrics.get("dangerZoneCells", 0) > 0
+    )
+
+
+def placement_safety_penalty(placement: Placement) -> float:
+    metrics = board_metrics([list(row) for row in placement.board])
+    top_pressure = max(0, metrics["maxHeight"] - 14)
+    return (
+        (100000.0 if placement.done else 0.0)
+        + 6.0 * metrics.get("topZoneCells", 0)
+        + 2.0 * metrics.get("dangerZoneCells", 0)
+        + 3.0 * top_pressure * top_pressure
+        + 1.5 * metrics["holes"]
+        + 0.05 * metrics.get("coveredHoles", 0)
+        + 0.5 * metrics["wells"]
+        + 0.3 * metrics["bumpiness"]
+        + 0.2 * metrics["maxHeight"]
+    )
+
+
+def choose_placement(
+    model,
+    torch,
+    device,
+    game: Game,
+    epsilon: float,
+    reward_profile: str = "survival",
+    safety_config: SafetyConfig | None = None,
+) -> Placement | None:
     placements = playable_candidate_placements(game, reward_profile)
     if not placements:
         return None
@@ -113,6 +172,13 @@ def choose_placement(model, torch, device, game: Game, epsilon: float, reward_pr
     with torch.no_grad():
         batch = torch.tensor([placement.vector for placement in placements], dtype=torch.float32, device=device)
         values = model(batch)
+        if safety_config and safety_overlay_active(board_metrics(game.board), safety_config):
+            penalties = torch.tensor(
+                [placement_safety_penalty(placement) for placement in placements],
+                dtype=torch.float32,
+                device=device,
+            )
+            values = values - safety_config.weight * penalties
         return placements[int(torch.argmax(values).item())]
 
 
@@ -328,13 +394,14 @@ def evaluate_seed(
     capture_replay: bool = False,
     start_mode: str = "clean",
     recovery_severity: str = "medium",
+    safety_config: SafetyConfig | None = None,
 ):
     max_pieces = max(1, math.ceil(max_seconds / GRAVITY_SECONDS))
     game = create_start_game(seed, start_mode, recovery_severity)
     frames = []
     pieces = 0
     while not game.game_over and pieces < max_pieces:
-        placement = choose_placement(model, torch, device, game, epsilon=0.0)
+        placement = choose_placement(model, torch, device, game, epsilon=0.0, safety_config=safety_config)
         if placement is None:
             break
         if capture_replay:
@@ -403,7 +470,7 @@ def init_eval_worker(model_state: dict[str, dict[str, Any]]) -> None:
 
 
 def evaluate_seed_in_worker(task):
-    seed, max_seconds, capture_replay, start_mode, recovery_severity = task
+    seed, max_seconds, capture_replay, start_mode, recovery_severity, safety_config = task
     return evaluate_seed(
         _EVAL_MODEL,
         _EVAL_TORCH,
@@ -413,6 +480,7 @@ def evaluate_seed_in_worker(task):
         capture_replay,
         start_mode,
         recovery_severity,
+        safety_config,
     )
 
 
@@ -440,6 +508,7 @@ def evaluate(
     eval_workers: int = 1,
     start_mode: str = "clean",
     recovery_severity: str = "medium",
+    safety_config: SafetyConfig | None = None,
 ):
     workers = resolved_eval_workers(eval_workers, len(seeds))
     if workers <= 1:
@@ -453,13 +522,14 @@ def evaluate(
                 capture_replay and index == 0,
                 start_mode,
                 recovery_severity,
+                safety_config,
             )
             for index, seed in enumerate(seeds)
         ]
     else:
         model_state = serialize_model_state(model, torch)
         tasks = [
-            (seed, max_seconds, capture_replay and index == 0, start_mode, recovery_severity)
+            (seed, max_seconds, capture_replay and index == 0, start_mode, recovery_severity, safety_config)
             for index, seed in enumerate(seeds)
         ]
         with ProcessPoolExecutor(
@@ -502,6 +572,8 @@ def print_training_legend(args) -> None:
         print(f"  eval_regression_tolerance = {args.eval_regression_tolerance:.3f};")
     if args.source_anchor_weight:
         print(f"  source_anchor_weight = {args.source_anchor_weight:.3f};")
+    if args.safety_profile != "none":
+        print(f"  safety_profile = {args.safety_profile}; safety_weight = {args.safety_weight:.3f};")
     print(f"  eval_success = fraction of held-out seeds that survive {args.milestone_seconds:.0f}s;")
     print("  median = median survival time;")
     print("  mean_score/median_score/max_score = held-out evaluation scores;")
@@ -527,12 +599,23 @@ def run(args) -> None:
         raise ValueError("--eval-regression-tolerance must be >= 0")
     if args.source_anchor_weight < 0.0:
         raise ValueError("--source-anchor-weight must be >= 0")
+    if args.safety_weight < 0.0:
+        raise ValueError("--safety-weight must be >= 0")
+    if args.safety_trigger_height < 0:
+        raise ValueError("--safety-trigger-height must be >= 0")
+    if args.safety_trigger_holes < 0:
+        raise ValueError("--safety-trigger-holes must be >= 0")
+    if args.safety_trigger_covered_holes < 0:
+        raise ValueError("--safety-trigger-covered-holes must be >= 0")
+    if args.safety_trigger_wells < 0:
+        raise ValueError("--safety-trigger-wells must be >= 0")
     if args.best_model_objective == "recovery" and args.recovery_eval_seeds <= 0:
         raise ValueError("--best-model-objective recovery requires --recovery-eval-seeds > 0")
 
     torch, _ = require_torch()
     random.seed(args.seed)
     device = best_device(torch)
+    safety_config = safety_config_from_args(args)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     print_training_legend(args)
@@ -579,6 +662,7 @@ def run(args) -> None:
             args.milestone_seconds,
             capture_replay=False,
             eval_workers=args.eval_workers,
+            safety_config=safety_config,
         )
         baseline_recovery_eval_result = None
         if args.recovery_eval_seeds > 0:
@@ -592,6 +676,7 @@ def run(args) -> None:
                 eval_workers=args.eval_workers,
                 start_mode="recovery",
                 recovery_severity=args.recovery_severity,
+                safety_config=safety_config,
             )
         best_median, best_top_out, best_score = best_tracking_values(
             args,
@@ -673,7 +758,7 @@ def run(args) -> None:
         epsilon = args.eps_end + (args.eps_start - args.eps_end) * math.exp(-global_step / args.eps_decay)
 
         while not game.game_over and pieces < args.max_pieces:
-            placement = choose_placement(model, torch, device, game, epsilon, args.reward_profile)
+            placement = choose_placement(model, torch, device, game, epsilon, args.reward_profile, safety_config)
             if placement is None:
                 break
             next_game = apply_actions(game, placement.actions)
@@ -768,6 +853,7 @@ def run(args) -> None:
                 args.milestone_seconds,
                 capture_replay=True,
                 eval_workers=args.eval_workers,
+                safety_config=safety_config,
             )
             recovery_eval_result = None
             if args.recovery_eval_seeds > 0:
@@ -781,6 +867,7 @@ def run(args) -> None:
                     eval_workers=args.eval_workers,
                     start_mode="recovery",
                     recovery_severity=args.recovery_severity,
+                    safety_config=safety_config,
                 )
             eval_metrics = {
                 "type": "eval",
@@ -979,6 +1066,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--eval-workers", type=int, default=0, help="Evaluation worker processes. Use 0 for auto.")
     parser.add_argument("--milestone-seconds", type=float, default=60.0)
     parser.add_argument("--reward-profile", choices=REWARD_PROFILES, default="survival")
+    parser.add_argument("--safety-profile", choices=SAFETY_PROFILES, default="none")
+    parser.add_argument("--safety-weight", type=float, default=1.0)
+    parser.add_argument("--safety-trigger-height", type=int, default=14)
+    parser.add_argument("--safety-trigger-holes", type=int, default=8)
+    parser.add_argument("--safety-trigger-covered-holes", type=int, default=40)
+    parser.add_argument("--safety-trigger-wells", type=int, default=8)
     parser.add_argument("--reset-replay-on-resume", action="store_true")
     parser.add_argument("--reset-optimizer-on-resume", action="store_true")
     parser.add_argument("--best-model-objective", choices=("survival", "score", "recovery"), default="survival")
