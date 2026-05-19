@@ -31,7 +31,7 @@ HELD_OUT_SEEDS = [f"heldout-{index}" for index in range(200)]
 _EVAL_MODEL = None
 _EVAL_TORCH = None
 _EVAL_DEVICE = "cpu"
-SAFETY_PROFILES = ("none", "safety-v1")
+SAFETY_PROFILES = ("none", "safety-v1", "safety-v2")
 
 
 @dataclass
@@ -139,10 +139,10 @@ def safety_overlay_active(metrics: dict[str, int], safety_config: SafetyConfig) 
     )
 
 
-def placement_safety_penalty(placement: Placement) -> float:
+def placement_safety_penalty(placement: Placement, safety_config: SafetyConfig | None = None) -> float:
     metrics = board_metrics([list(row) for row in placement.board])
     top_pressure = max(0, metrics["maxHeight"] - 14)
-    return (
+    penalty = (
         (100000.0 if placement.done else 0.0)
         + 6.0 * metrics.get("topZoneCells", 0)
         + 2.0 * metrics.get("dangerZoneCells", 0)
@@ -153,6 +153,18 @@ def placement_safety_penalty(placement: Placement) -> float:
         + 0.3 * metrics["bumpiness"]
         + 0.2 * metrics["maxHeight"]
     )
+    if safety_config and safety_config.profile == "safety-v2":
+        critical_height = max(0, metrics["maxHeight"] - 15)
+        critical_holes = max(0, metrics["holes"] - 12)
+        critical_covered = max(0, metrics.get("coveredHoles", 0) - 70)
+        penalty += (
+            18.0 * metrics.get("topZoneCells", 0)
+            + 6.0 * metrics.get("dangerZoneCells", 0)
+            + 10.0 * critical_height * critical_height
+            + 3.0 * critical_holes * critical_holes
+            + 0.4 * critical_covered
+        )
+    return penalty
 
 
 def choose_placement(
@@ -174,7 +186,7 @@ def choose_placement(
         values = model(batch)
         if safety_config and safety_overlay_active(board_metrics(game.board), safety_config):
             penalties = torch.tensor(
-                [placement_safety_penalty(placement) for placement in placements],
+                [placement_safety_penalty(placement, safety_config) for placement in placements],
                 dtype=torch.float32,
                 device=device,
             )

@@ -270,6 +270,18 @@ class AfterstateTest(unittest.TestCase):
         self.assertIsNotNone(placement)
         self.assertLess(placement_safety_penalty(placement), placement_safety_penalty(preferred))
 
+    def test_safety_v2_adds_critical_afterstate_penalty(self):
+        game = self.high_risk_game()
+        placement = max(
+            enumerate_placements(game, "survival-v2"),
+            key=lambda candidate: board_metrics([list(row) for row in candidate.board])["topZoneCells"],
+        )
+
+        self.assertGreater(
+            placement_safety_penalty(placement, SafetyConfig(profile="safety-v2")),
+            placement_safety_penalty(placement, SafetyConfig(profile="safety-v1")),
+        )
+
     def high_risk_game(self):
         board = [
             [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
